@@ -7,7 +7,7 @@
 - [ ] キャラクターの名前や設定をUIで編集できるようにする
 - [x] GitHub ソース
 - [x] GitLab ソース
-- [ ] Zulip ソース
+- [x] Zulip ソース
 - [ ] Google Chat / Gmail ソース
 - [ ] 所長から所員への再調査の依頼
 - [x] Markdown表示
