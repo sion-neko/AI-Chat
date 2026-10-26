@@ -1,0 +1,19 @@
+services:
+  agent:
+    build: .
+    env_file: .env
+    volumes:
+      - ./app:/work/app
+      - ./data:/work/data
+    ports:
+      # 自分のPCからだけ開けるよう 127.0.0.1 に限定（LANに公開しない）
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      - mock-llm
+
+  # OpenAI互換のフェイクLLM。ローカルLLMなしでエージェントループを検証するためのもの
+  mock-llm:
+    image: python:3.12-slim
+    command: ["python", "/srv/server.py"]
+    volumes:
+      - ./mock_llm:/srv:ro

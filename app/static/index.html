@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>おばけ探偵事務所</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <aside>
+    <button id="new-chat" type="button">＋ 新しい会話</button>
+    <nav id="conversations"></nav>
+  </aside>
+
+  <div class="chat">
+    <header>
+      <h1>おばけ探偵事務所</h1>
+      <span id="model" class="model-badge" title="設定中のモデル">…</span>
+    </header>
+
+    <main id="log"></main>
+
+    <fieldset id="sources" class="sources">
+      <legend>検索するソース</legend>
+    </fieldset>
+
+    <form id="form">
+      <textarea id="input" rows="1" placeholder="メッセージを入力（Enterで送信 / Shift+Enterで改行）"></textarea>
+      <button id="send" type="submit">送信</button>
+    </form>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
