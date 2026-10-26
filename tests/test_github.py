@@ -42,7 +42,7 @@ class GitHubTest(unittest.TestCase):
 
         req = api.requests[0]
         self.assertEqual(req["params"]["q"], "VPN 証明書 org:me updated:>=2026-10-01 state:closed")
-        self.assertEqual(req["headers"]["Authorization"], "Bearer t0ken")
+        self.assertEqual(req["headers"]["authorization"], "Bearer t0ken")
         self.assertEqual([r["kind"] for r in results], ["issue", "pull_request"])
         self.assertEqual(results[0]["repo"], "me/infra")
         self.assertTrue(results[0]["body"].endswith("…（省略）"))

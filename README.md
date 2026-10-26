@@ -11,7 +11,7 @@ LLMはローカルLLM（OpenAI互換エンドポイント）を使い、デー�
 
 - `app/agent.py` … 所長と所員のチーム調査。所員はLangGraphのツールループで並列に動く
 - `app/characters.py` … 所長・所員の名前と性格
-- `app/sources/` … 検索ソースの定義（ダミー2つ、GitHub）
+- `app/sources/` … 検索ソースの定義（ダミー2つ、GitHub、GitLab）
 - `app/web.py` + `app/static/` … ローカルWeb UI（標準ライブラリのみ）
 - `app/db.py` … 会話の保存（SQLite、`data/chat.db`）
 - `mock_llm/server.py` … OpenAI互換のフェイクLLM。ローカルLLMなしでループを検証する用
@@ -34,6 +34,7 @@ Pythonを変更したら `docker compose restart agent`。
 | ソース | 必要な設定 | 調べるもの |
 |---|---|---|
 | GitHub | `GITHUB_TOKEN`（`GITHUB_SCOPE` で範囲を絞れる） | Issue・Pull Request とコメント |
+| GitLab | `GITLAB_URL` `GITLAB_TOKEN`（`GITLAB_GROUP` で範囲を絞れる） | Issue・Merge Request とコメント（検索はタイトルと本文だけ） |
 
 ## テスト
 

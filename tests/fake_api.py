@@ -16,7 +16,7 @@ class FakeApi:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 url = urllib.parse.urlsplit(self.path)
-                api.requests.append({"path": url.path, "params": dict(urllib.parse.parse_qsl(url.query)), "headers": dict(self.headers)})
+                api.requests.append({"path": url.path, "params": dict(urllib.parse.parse_qsl(url.query)), "headers": {k.lower(): v for k, v in self.headers.items()}})
                 status, body = 404, {"message": "Not Found"}
                 if url.path in api.routes:
                     route = api.routes[url.path]
