@@ -45,6 +45,17 @@ Zulipの全文検索で日本語をうまく拾うには、Zulip側で PGroonga 
 docker compose run --rm -v ./tests:/work/tests agent python -m unittest
 ```
 
+## 配布する
+
+```sh
+python scripts/make_dist.py --env dist.env   # → dist/ai-chat-YYYYMMDD.zip
+```
+
+`dist.env` には配布先で使うLLMの設定（`.env.example` の LLM の部分）だけを書く。zipに `.env` として同梱される。
+`dist.env` と `dist/` はコミットしない（.gitignore 済み）。個人のトークンが書かれていると zip は作られない。
+
+受け取った人は、zipを展開して `.env` に自分のトークン（検索ソースの設定）を書き足し、`docker compose up -d --build` する。
+
 ## LLMを切り替える
 
 `.env` の `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` を書き換えて `docker compose up -d`（例は `.env.example`）。
