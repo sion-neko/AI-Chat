@@ -109,9 +109,9 @@ def run_member(source: Source, questions: list[str], emit: Emit) -> dict:
     return report
 
 
-def run_director(history: list[dict], question: str, reports: list[dict]) -> dict:
+def run_director(director: characters.Character, history: list[dict], question: str, reports: list[dict]) -> dict:
     """所長が報告をまとめる。history は過去のターン（質問と所長の回答）。"""
-    prompt = DIRECTOR_PROMPT.format(name=characters.DIRECTOR.name, persona=characters.DIRECTOR.persona, today=date.today())
+    prompt = DIRECTOR_PROMPT.format(name=director.name, persona=director.persona, today=date.today())
     messages = [SystemMessage(prompt)]
     for turn in history:
         messages.append(HumanMessage(turn["content"]) if turn["role"] == "user" else AIMessage(turn["content"]))
@@ -133,6 +133,7 @@ def run_turn(history: list[dict], question: str, sources: list[Source], emit: Em
     with ThreadPoolExecutor(max_workers=len(sources)) as pool:
         reports = list(pool.map(lambda s: run_member(s, questions, emit), sources))
 
-    emit({"type": "director_start", "agent": characters.DIRECTOR.name})
-    answer = run_director(history, question, reports)
-    return {"role": "assistant", "agent": characters.DIRECTOR.name, **answer, "reports": reports}
+    director = characters.director()
+    emit({"type": "director_start", "agent": director.name})
+    answer = run_director(director, history, question, reports)
+    return {"role": "assistant", "agent": director.name, **answer, "reports": reports}

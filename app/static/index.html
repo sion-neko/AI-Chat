@@ -16,6 +16,7 @@
     <header>
       <h1>おばけ探偵事務所</h1>
       <span id="model" class="model-badge" title="設定中のモデル">…</span>
+      <button id="open-characters" class="header-button" type="button">キャラクター</button>
     </header>
 
     <main id="log"></main>
@@ -29,6 +30,15 @@
       <button id="send" type="submit">送信</button>
     </form>
   </div>
+
+  <dialog id="characters">
+    <div class="dialog-head">
+      <h2>キャラクター</h2>
+      <button id="close-characters" type="button" title="閉じる">×</button>
+    </div>
+    <p class="dialog-note">所長と所員の名前と性格（口調や得意なこと）を変えられます。変更は次の質問から反映されます。</p>
+    <div id="character-list"></div>
+  </dialog>
 
   <script src="/static/markdown.js"></script>
   <script src="/static/app.js"></script>

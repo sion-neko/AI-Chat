@@ -27,6 +27,12 @@ CREATE TABLE IF NOT EXISTS turns (
     data            TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS turns_conversation ON turns(conversation_id, id);
+-- 画面で編集したキャラクター。key は "director" かソースID。ない場合はコードの既定値を使う
+CREATE TABLE IF NOT EXISTS characters (
+    key     TEXT PRIMARY KEY,
+    name    TEXT NOT NULL,
+    persona TEXT NOT NULL
+);
 """
 
 
@@ -87,3 +93,18 @@ def append_turns(conv_id: str, turns: list[dict]):
             [(conv_id, json.dumps(t, ensure_ascii=False)) for t in turns],
         )
         conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (_now(), conv_id))
+
+
+def load_characters() -> dict[str, dict]:
+    with connect() as conn:
+        return {r["key"]: {"name": r["name"], "persona": r["persona"]} for r in conn.execute("SELECT * FROM characters")}
+
+
+def save_character(key: str, name: str, persona: str):
+    with connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO characters VALUES (?, ?, ?)", (key, name, persona))
+
+
+def delete_character(key: str):
+    with connect() as conn:
+        conn.execute("DELETE FROM characters WHERE key = ?", (key,))

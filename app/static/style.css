@@ -283,3 +283,59 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 }
 
 .markdown th { background: var(--panel); }
+
+.header-button { margin-left: auto; }
+
+dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  padding: 16px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+dialog::backdrop { background: rgb(0 0 0 / 0.4); }
+
+.dialog-head { display: flex; align-items: center; justify-content: space-between; }
+
+.dialog-head h2 { margin: 0; font-size: 16px; }
+
+.dialog-head button { border: none; background: none; font-size: 18px; padding: 0 6px; }
+
+.dialog-note { margin: 4px 0 12px; font-size: 13px; color: var(--muted); }
+
+form.character {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: none;
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.character-role { font-size: 13px; font-weight: bold; }
+
+.field { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); }
+
+.field input, .field textarea {
+  font: inherit;
+  font-size: 14px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.field textarea { resize: vertical; max-height: none; }
+
+.character-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+
+.character-status { margin-right: auto; font-size: 12px; color: var(--error); }
+
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }

@@ -7,6 +7,9 @@ API:
   GET    /api/conversations/{id}          会話の中身（ターン単位）
   POST   /api/conversations/{id}/messages {content, sources} 続きの質問をする
   DELETE /api/conversations/{id}
+  GET    /api/characters                  所長と所員（使えるソースの分）
+  PUT    /api/characters/{key}            {name, persona} キャラクターを編集する。key は "director" かソースID
+  DELETE /api/characters/{key}            キャラクターを既定に戻す
 
 sources は検索に使うソースIDの配列。
 
@@ -39,9 +42,23 @@ TITLE_LENGTH = 40
 def config() -> dict:
     return {
         "model": os.environ["LLM_MODEL"],
-        "director": characters.DIRECTOR.name,
+        "director": characters.director().name,
         "sources": [{**s, "agent": characters.member(s["id"], s["label"]).name} for s in sources.describe()],
     }
+
+
+def character_list() -> list[dict]:
+    """編集画面に出すキャラクター。role は画面に出す役割の説明。"""
+    director = characters.director()
+    result = [{"key": characters.DIRECTOR_KEY, "role": "所長", "name": director.name, "persona": director.persona}]
+    for s in sources.describe():
+        member = characters.member(s["id"], s["label"])
+        result.append({"key": s["id"], "role": f"{s['label']}の担当", "name": member.name, "persona": member.persona})
+    return result
+
+
+def _character_key(key: str) -> bool:
+    return key == characters.DIRECTOR_KEY or key in {s["id"] for s in sources.describe()}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -61,7 +78,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self, fn):
         try:
             fn()
-        except sources.SourceError as e:
+        except (sources.SourceError, characters.CharacterError) as e:
             self._send_json(400, {"error": str(e)})
         except Exception as e:
             traceback.print_exc()
@@ -73,6 +90,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._handle(self._post)
 
+    def do_PUT(self):
+        self._handle(self._put)
+
     def do_DELETE(self):
         self._handle(self._delete)
 
@@ -81,6 +101,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, config())
         if self.path == "/api/conversations":
             return self._send_json(200, db.list_conversations())
+        if self.path == "/api/characters":
+            return self._send_json(200, character_list())
         if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
             turns = db.load_turns(m[1])
             if turns is None:
@@ -109,10 +131,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._stream_turn(m[1], history, req["content"], selected, is_new=False)
         self.send_error(404)
 
+    def _put(self):
+        if m := re.fullmatch(r"/api/characters/(\w+)", self.path):
+            if not _character_key(m[1]):
+                return self._send_json(404, {"error": "not found"})
+            req = self._read_json()
+            characters.save(m[1], req["name"], req["persona"])
+            return self._send_json(200, character_list())
+        self.send_error(404)
+
     def _delete(self):
         if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
             db.delete_conversation(m[1])
             return self._send_json(200, {})
+        if m := re.fullmatch(r"/api/characters/(\w+)", self.path):
+            if not _character_key(m[1]):
+                return self._send_json(404, {"error": "not found"})
+            characters.reset(m[1])
+            return self._send_json(200, character_list())
         self.send_error(404)
 
     def _stream_turn(self, conv_id: str, history: list[dict], question: str, selected: list[sources.Source], is_new: bool):

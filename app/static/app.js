@@ -8,10 +8,9 @@ const input = document.getElementById("input");
 const send = document.getElementById("send");
 const sourceBox = document.getElementById("sources");
 
-api("GET", "/api/config").then((c) => {
-  document.getElementById("model").textContent = c.model;
-  renderSources(c.sources);
-});
+const characterDialog = document.getElementById("characters");
+
+loadConfig();
 refreshList();
 showEmpty();
 
@@ -21,6 +20,14 @@ document.getElementById("new-chat").addEventListener("click", () => {
   highlightCurrent();
   input.focus();
 });
+
+document.getElementById("open-characters").addEventListener("click", async () => {
+  renderCharacters(await api("GET", "/api/characters"));
+  characterDialog.showModal();
+});
+document.getElementById("close-characters").addEventListener("click", () => characterDialog.close());
+// 名前が変わったらソースの表示（「GitHub（名前）」）も変わる
+characterDialog.addEventListener("close", loadConfig);
 
 input.addEventListener("input", autosize);
 input.addEventListener("keydown", (e) => {
@@ -66,13 +73,22 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
+async function loadConfig() {
+  const c = await api("GET", "/api/config");
+  document.getElementById("model").textContent = c.model;
+  renderSources(c.sources);
+}
+
+// 選択状態は描き直しても保つ（初回はすべて選択）
 function renderSources(sources) {
+  const checked = sourceBox.querySelector("input") ? new Set(selectedSources()) : null;
+  for (const label of sourceBox.querySelectorAll("label")) label.remove();
   for (const s of sources) {
     const label = el("label", "source");
     const box = el("input");
     box.type = "checkbox";
     box.value = s.id;
-    box.checked = true;
+    box.checked = checked ? checked.has(s.id) : true;
     label.append(box, `${s.label}（${s.agent}）`);
     sourceBox.append(label);
   }
@@ -80,6 +96,50 @@ function renderSources(sources) {
 
 function selectedSources() {
   return [...sourceBox.querySelectorAll("input:checked")].map((box) => box.value);
+}
+
+function renderCharacters(list) {
+  document.getElementById("character-list").replaceChildren(...list.map(characterForm));
+}
+
+function characterForm(c) {
+  const form = el("form", "character");
+  const name = el("input");
+  name.value = c.name;
+  name.maxLength = 20;
+  name.required = true;
+  const persona = el("textarea");
+  persona.value = c.persona;
+  persona.maxLength = 300;
+  persona.rows = 3;
+  const status = el("span", "character-status");
+  const reset = el("button", "", "既定に戻す");
+  reset.type = "button";
+  const save = el("button", "primary", "保存");
+
+  const run = async (request) => {
+    try {
+      renderCharacters(await request());
+    } catch (err) {
+      status.textContent = err.message;
+    }
+  };
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    run(() => api("PUT", `/api/characters/${c.key}`, { name: name.value, persona: persona.value }));
+  });
+  reset.addEventListener("click", () => run(() => api("DELETE", `/api/characters/${c.key}`)));
+
+  const actions = el("div", "character-actions");
+  actions.append(status, reset, save);
+  form.append(el("div", "character-role", c.role), labeled("名前", name), labeled("性格", persona), actions);
+  return form;
+}
+
+function labeled(text, control) {
+  const label = el("label", "field");
+  label.append(el("span", "", text), control);
+  return label;
 }
 
 async function openConversation(id) {

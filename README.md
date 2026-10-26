@@ -10,7 +10,7 @@ LLMはローカルLLM（OpenAI互換エンドポイント）を使い、デー�
 開発予定は [docs/ROADMAP.md](docs/ROADMAP.md)。
 
 - `app/agent.py` … 所長と所員のチーム調査。所員はLangGraphのツールループで並列に動く
-- `app/characters.py` … 所長・所員の名前と性格
+- `app/characters.py` … 所長・所員の名前と性格の既定値。画面（ヘッダーの「キャラクター」）で変えた内容はDBに保存して優先する
 - `app/sources/` … 検索ソースの定義（ダミー2つ、GitHub、GitLab、Zulip）
 - `app/web.py` + `app/static/` … ローカルWeb UI（標準ライブラリのみ）
 - `app/db.py` … 会話の保存（SQLite、`data/chat.db`）
