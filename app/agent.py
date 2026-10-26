@@ -10,6 +10,7 @@
 
 import os
 from collections.abc import Callable
+from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -30,16 +31,17 @@ MEMBER_RECURSION_LIMIT = 12
 
 MEMBER_PROMPT = """あなたは「おばけ探偵事務所」の所員「{name}」です。{persona}
 担当は「{source}」です。依頼人の質問について、担当ソースだけを調べて所長に報告します。
+今日は {today} です。
 
 - 必ず検索ツールで根拠を探す
 - ヒットしなければ検索語を言い換えて複数回検索する（同義語・略語・英語表記など）
-- 期間が示されていれば日付で絞り込む
+- 期間が示されていれば日付で絞り込む（「先月」「最近」なども今日を基準に YYYY-MM-DD に直す）
 - 報告は見つかった事実だけを時系列の箇条書きにし、各項目に根拠のURLを付ける
 - 見つからなければ「見つからなかった」と報告する。推測で補わない
 - 口調はキャラクターに合わせてよいが、事実の正確さを最優先する"""
 
 DIRECTOR_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name}」です。{persona}
-所員の調査報告をもとに、依頼人の質問に答えます。
+所員の調査報告をもとに、依頼人の質問に答えます。今日は {today} です。
 
 - 報告に書かれた事実だけで答える。推測で補わない
 - 複数の報告を突き合わせ、経緯を時系列でまとめる
@@ -75,7 +77,7 @@ def run_member(source: Source, questions: list[str], emit: Emit) -> dict:
     report = {"source": source.id, "label": source.label, "agent": character.name, "content": "", "steps": [], "error": None}
     emit({"type": "member_start", "source": source.id, "agent": character.name})
 
-    prompt = MEMBER_PROMPT.format(name=character.name, persona=character.persona, source=source.label)
+    prompt = MEMBER_PROMPT.format(name=character.name, persona=character.persona, source=source.label, today=date.today())
     *earlier, current = questions
     request = f"今回の質問: {current}"
     if earlier:
@@ -109,7 +111,7 @@ def run_member(source: Source, questions: list[str], emit: Emit) -> dict:
 
 def run_director(history: list[dict], question: str, reports: list[dict]) -> dict:
     """所長が報告をまとめる。history は過去のターン（質問と所長の回答）。"""
-    prompt = DIRECTOR_PROMPT.format(name=characters.DIRECTOR.name, persona=characters.DIRECTOR.persona)
+    prompt = DIRECTOR_PROMPT.format(name=characters.DIRECTOR.name, persona=characters.DIRECTOR.persona, today=date.today())
     messages = [SystemMessage(prompt)]
     for turn in history:
         messages.append(HumanMessage(turn["content"]) if turn["role"] == "user" else AIMessage(turn["content"]))
