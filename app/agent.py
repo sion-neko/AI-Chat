@@ -17,9 +17,11 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt.tool_node import ToolInvocationError
 
 from app import characters
 from app.sources import Source
+from app.sources.http import ApiError
 
 Emit = Callable[[dict], None]
 
@@ -59,7 +61,8 @@ def _tool_loop(system_prompt: str, tools: list[BaseTool]):
 
     graph = StateGraph(MessagesState)
     graph.add_node("llm", call_llm)
-    graph.add_node("tools", ToolNode(tools))
+    # 引数の誤りとAPIのエラーはLLMに返して、検索し直させる。それ以外は所員の調査失敗にする
+    graph.add_node("tools", ToolNode(tools, handle_tool_errors=(ToolInvocationError, ApiError)))
     graph.add_edge(START, "llm")
     graph.add_conditional_edges("llm", tools_condition)
     graph.add_edge("tools", "llm")

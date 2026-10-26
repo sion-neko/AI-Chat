@@ -1,7 +1,7 @@
 """OpenAI互換 /v1/chat/completions のフェイク実装（標準ライブラリのみ）。
 
 挙動:
-- 直前がユーザー発話でツールが渡されていれば、全ツールを質問文そのまま引数にして呼ぶ
+- 直前がユーザー発話でツールが渡されていれば、query だけで呼べるツールを全部、質問文そのままを query にして呼ぶ
 - 直前がツール結果なら、その結果を要約したことにして最終回答を返す
 - ツールなしで呼ばれたら、受け取った内容をそのまま返す
 """
@@ -26,7 +26,7 @@ def _completion(model: str, message: dict, finish_reason: str) -> dict:
 def respond(req: dict) -> dict:
     model = req.get("model", "mock")
     last = req["messages"][-1]
-    tools = req.get("tools") or []
+    tools = [t for t in req.get("tools") or [] if set(t["function"]["parameters"].get("required", [])) <= {"query"}]
 
     if last["role"] == "user" and tools:
         args = json.dumps({"query": last["content"]}, ensure_ascii=False)
