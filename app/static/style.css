@@ -169,6 +169,8 @@ details.report summary { cursor: pointer; color: var(--muted); }
 
 .report-body { margin-top: 6px; white-space: pre-wrap; }
 
+details.report > .markdown { margin-top: 6px; }
+
 details.report pre {
   margin: 6px 0;
   max-height: 240px;
@@ -221,3 +223,63 @@ textarea {
 }
 
 textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.markdown { white-space: normal; }
+
+.markdown > :first-child { margin-top: 0; }
+
+.markdown > :last-child { margin-bottom: 0; }
+
+.markdown p, .markdown ul, .markdown ol, .markdown blockquote, .markdown pre, .markdown .table-wrap { margin: 0 0 10px; }
+
+.markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 {
+  margin: 16px 0 8px;
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.markdown h1 { font-size: 18px; }
+
+.markdown h2 { font-size: 16px; }
+
+.markdown ul, .markdown ol { padding-left: 1.5em; }
+
+.markdown li > ul, .markdown li > ol, .markdown li > p { margin: 0; }
+
+.markdown blockquote {
+  padding-left: 12px;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.markdown code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 13px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--panel);
+}
+
+.markdown pre {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--panel);
+  overflow-x: auto;
+}
+
+.markdown pre code { padding: 0; background: none; }
+
+.markdown hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+
+.markdown .table-wrap { overflow-x: auto; }
+
+.markdown table { border-collapse: collapse; font-size: 14px; }
+
+.markdown th, .markdown td {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown th { background: var(--panel); }

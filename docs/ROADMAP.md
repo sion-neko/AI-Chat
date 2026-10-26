@@ -10,5 +10,5 @@
 - [ ] Zulip ソース
 - [ ] Google Chat / Gmail ソース
 - [ ] 所長から所員への再調査の依頼
-- [ ] Markdown表示
+- [x] Markdown表示
 - [ ] 配布用zipの作成

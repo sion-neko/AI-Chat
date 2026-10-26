@@ -158,7 +158,7 @@ function assistantMessage({ agent, content, model, reports }) {
   const box = el("div", "msg assistant");
   box.append(el("div", "meta", `${agent}所長 · ${model}`));
   for (const r of reports) box.append(reportView(r));
-  box.append(linkify(content));
+  box.append(markdownView(content));
   return box;
 }
 
@@ -169,27 +169,14 @@ function reportView(report) {
   for (const s of report.steps) {
     details.append(el("pre", "", `${s.tool}(${JSON.stringify(s.args)})\n→ ${s.result || "(結果なし)"}`));
   }
-  const body = el("div", "report-body");
-  body.append(report.error ? `エラー: ${report.error}` : linkify(report.content || "（報告なし）"));
-  details.append(body);
+  details.append(report.error ? el("div", "report-body", `エラー: ${report.error}`) : markdownView(report.content || "（報告なし）"));
   return details;
 }
 
-// URLだけリンクにする。innerHTMLは使わない（回答本文をHTMLとして解釈させない）
-function linkify(text) {
-  const frag = document.createDocumentFragment();
-  let last = 0;
-  for (const m of text.matchAll(/https?:\/\/[^\s"'<>）」]+/g)) {
-    frag.append(text.slice(last, m.index));
-    const a = el("a", "", m[0]);
-    a.href = m[0];
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    frag.append(a);
-    last = m.index + m[0].length;
-  }
-  frag.append(text.slice(last));
-  return frag;
+function markdownView(text) {
+  const node = el("div", "markdown");
+  node.append(renderMarkdown(text));
+  return node;
 }
 
 // NDJSON（1行1イベント）のレスポンスを読みながら onEvent を呼ぶ。onEvent が投げた例外はそのまま伝わる
