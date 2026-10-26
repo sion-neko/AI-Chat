@@ -2,6 +2,7 @@
 
 挙動:
 - 直前がユーザー発話でツールが渡されていれば、query だけで呼べるツールを全部、質問文そのままを query にして呼ぶ
+- 所長に再調査のツールが渡され、質問に「再調査」が含まれていれば、全所員に再調査を頼む
 - 直前がツール結果なら、その結果を要約したことにして最終回答を返す
 - ツールなしで呼ばれたら、受け取った内容をそのまま返す
 """
@@ -23,17 +24,23 @@ def _completion(model: str, message: dict, finish_reason: str) -> dict:
     }
 
 
+def _call(name: str, args: dict) -> dict:
+    return {"id": f"call_{uuid.uuid4().hex[:8]}", "type": "function", "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
+
+
 def respond(req: dict) -> dict:
     model = req.get("model", "mock")
     last = req["messages"][-1]
-    tools = [t for t in req.get("tools") or [] if set(t["function"]["parameters"].get("required", [])) <= {"query"}]
+    all_tools = {t["function"]["name"]: t["function"] for t in req.get("tools") or []}
+    tools = [name for name, f in all_tools.items() if set(f["parameters"].get("required", [])) <= {"query"}]
+
+    if last["role"] == "user" and "request_reinvestigation" in all_tools and "再調査" in last["content"]:
+        sources = all_tools["request_reinvestigation"]["parameters"]["properties"]["source"]["enum"]
+        calls = [_call("request_reinvestigation", {"source": s, "instruction": "[mock] 別の言い方でもう一度調べて"}) for s in sources]
+        return _completion(model, {"role": "assistant", "content": None, "tool_calls": calls}, "tool_calls")
 
     if last["role"] == "user" and tools:
-        args = json.dumps({"query": last["content"]}, ensure_ascii=False)
-        calls = [
-            {"id": f"call_{uuid.uuid4().hex[:8]}", "type": "function", "function": {"name": t["function"]["name"], "arguments": args}}
-            for t in tools
-        ]
+        calls = [_call(name, {"query": last["content"]}) for name in tools]
         return _completion(model, {"role": "assistant", "content": None, "tool_calls": calls}, "tool_calls")
 
     if last["role"] == "tool":

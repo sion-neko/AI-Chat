@@ -192,6 +192,7 @@ function progressView() {
   const node = el("div", "msg progress");
   const rows = new Map();
   const agents = new Map();
+  let director = "";
   const row = (key, text) => {
     if (!rows.has(key)) rows.set(key, node.appendChild(el("div")));
     rows.get(key).textContent = text;
@@ -208,7 +209,11 @@ function progressView() {
       const r = event.report;
       row(r.source, `👻 ${r.agent}: ${r.error ? "調査失敗" : "報告済み"}`);
     } else if (event.type === "director_start") {
-      row("director", `🕵️ ${event.agent}所長: 報告をまとめています…`);
+      director = event.agent;
+      row("director", `🕵️ ${director}所長: 報告をまとめています…`);
+      node.append(rows.get("director")); // 再調査の後は最後の行に移す
+    } else if (event.type === "followup") {
+      row(`followup:${event.source}`, `🕵️ ${director}所長 → ${event.agent}: 再調査を依頼「${event.instruction}」`);
     }
   };
   return { node, update };
@@ -225,7 +230,9 @@ function assistantMessage({ agent, content, model, reports }) {
 function reportView(report) {
   const details = el("details", "report");
   const status = report.error ? "調査失敗" : `検索 ${report.steps.length}回`;
-  details.append(el("summary", "", `👻 ${report.agent}（${report.label}）の報告 · ${status}`));
+  const kind = report.request ? "再調査の報告" : "報告";
+  details.append(el("summary", "", `👻 ${report.agent}（${report.label}）の${kind} · ${status}`));
+  if (report.request) details.append(el("div", "report-request", `所長からの依頼: ${report.request}`));
   for (const s of report.steps) {
     details.append(el("pre", "", `${s.tool}(${JSON.stringify(s.args)})\n→ ${s.result || "(結果なし)"}`));
   }

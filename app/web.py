@@ -17,7 +17,8 @@ sources は検索に使うソースIDの配列。
   {"type": "member_start", "source", "agent"}   所員が調査を始めた
   {"type": "tool", "source", "tool", "args"}     所員が検索した
   {"type": "member_done", "report"}             所員が報告した
-  {"type": "director_start", "agent"}           所長がまとめ始めた
+  {"type": "director_start", "agent"}           所長がまとめ始めた（再調査の後にもう一度来る）
+  {"type": "followup", "source", "agent", "instruction"}  所長が所員に再調査を頼んだ（続いて member_start 〜 member_done が来る）
   {"type": "done", "conversation_id", "turn"}   回答（保存済み）
   {"type": "error", "message"}
 入力の検証で弾くときは、ストリームを始める前に通常のJSONで400を返す。

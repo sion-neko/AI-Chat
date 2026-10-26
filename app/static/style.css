@@ -181,6 +181,8 @@ details.report pre {
 
 .progress { color: var(--muted); font-size: 14px; }
 
+.report-request { margin-top: 6px; color: var(--muted); }
+
 .sources {
   display: flex;
   flex-wrap: wrap;
