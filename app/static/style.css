@@ -532,3 +532,49 @@ dialog::backdrop { background: rgb(20 24 30 / 0.45); }
 .markdown a.unverified { color: var(--error); text-decoration-style: dashed; }
 
 .markdown a.unverified::after { content: " ⚠"; font-size: 0.85em; }
+
+/* LLMとのやりとり */
+
+dialog.wide { width: min(900px, calc(100vw - 32px)); }
+
+.calls { display: flex; flex-direction: column; gap: 6px; }
+
+.call { border: 1px solid var(--line); border-radius: var(--radius); }
+
+.call > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.call[open] > summary { border-bottom: 1px solid var(--line); }
+
+.call-index { min-width: 1.5em; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.call-meta { color: var(--muted); font-size: var(--text-xs); }
+
+.call-tools { padding: 6px 12px 0; font-size: var(--text-xs); color: var(--muted); }
+
+.call-message { padding: 6px 12px; }
+
+.call-role { font-size: var(--text-xs); color: var(--muted); letter-spacing: 0.06em; }
+
+.call-message pre {
+  margin: 2px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--shelf);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.call-message.response { border-top: 1px dashed var(--line); }
+
+.call-message.response pre { background: var(--accent-soft); }

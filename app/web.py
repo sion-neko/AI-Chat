@@ -5,6 +5,7 @@ API:
   GET    /api/conversations               会話一覧
   POST   /api/conversations               {content, sources} 新しい会話を作って最初の質問をする
   GET    /api/conversations/{id}          会話の中身（ターン単位）
+  GET    /api/traces/{trace_id}           1ターン分のLLMとのやりとり
   POST   /api/conversations/{id}/messages {content, sources} 続きの質問をする
   DELETE /api/conversations/{id}
   POST   /api/turns/{turn_id}/cancel        調査中のターンを中止する（turn_id は start イベントで届く）
@@ -137,6 +138,11 @@ class Handler(BaseHTTPRequestHandler):
             if turns is None:
                 return self._send_json(404, {"error": "not found"})
             return self._send_json(200, {"id": m[1], "turns": turns})
+        if m := re.fullmatch(r"/api/traces/(\w+)", self.path):
+            trace = db.load_trace(m[1])
+            if trace is None:
+                return self._send_json(404, {"error": "not found"})
+            return self._send_json(200, trace)
 
         name = "index.html" if self.path == "/" else self.path.removeprefix("/static/")
         path = (STATIC_DIR / name).resolve()
@@ -204,6 +210,7 @@ class Handler(BaseHTTPRequestHandler):
         def work():
             try:
                 turn = agent.run_turn(history, question, selected, emit)
+                turn["trace_id"] = db.save_trace(conv_id, turn.pop("trace"))
                 db.append_turns(conv_id, [{"role": "user", "content": question}, turn])
                 events.put({"type": "done", "conversation_id": conv_id, "turn": turn})
             except agent.Cancelled:

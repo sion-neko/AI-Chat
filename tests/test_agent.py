@@ -67,6 +67,19 @@ class AgentTest(unittest.TestCase):
         self.assertEqual([r["source"] for r in turn["reports"]], ["dummy_chat", "dummy_wiki"])
         self.assertEqual(llm.director_calls, 1)
 
+        # 所員2人 × (検索の判断 + 報告) と所長1回。誰の呼び出しかと、送った内容が残る
+        whos = [c["who"] for c in turn["trace"]]
+        self.assertEqual(turn["llm_calls"], 5)
+        self.assertCountEqual(whos, ["シロ所長", "コソリ（ダミーWiki）", "コソリ（ダミーWiki）", "ポルタ（ダミーチャット）", "ポルタ（ダミーチャット）"])
+        director_call = turn["trace"][whos.index("シロ所長")]
+        self.assertEqual(director_call["tools"], ["request_reinvestigation"])
+        self.assertEqual(director_call["messages"][0]["role"], "system")
+        self.assertEqual(director_call["response"]["content"], "回答")
+        member_call = next(c for c in turn["trace"] if c["response"].get("tool_calls"))
+        self.assertEqual(member_call["response"]["tool_calls"][0]["args"], {"query": "ディスク"})
+        self.assertIn("seconds", turn["reports"][0]["steps"][0])
+        self.assertGreaterEqual(turn["seconds"], turn["reports"][0]["seconds"])
+
     def test_followup_runs_member_again_then_answers(self):
         llm = FakeLLM([{"source": "dummy_chat", "instruction": "10月に絞って"}, {"source": "nope", "instruction": "x"}])
         turn = self.run_turn(llm)

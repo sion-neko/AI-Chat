@@ -16,6 +16,7 @@ const send = document.getElementById("send");
 const sourceBox = document.getElementById("sources");
 const characterDialog = document.getElementById("characters");
 const statusDialog = document.getElementById("status");
+const traceDialog = document.getElementById("trace");
 
 // 外したソースはブラウザに覚えておく（新しく使えるようになったソースは選んだ状態で出す）
 const UNCHECKED_KEY = "unchecked-sources";
@@ -54,6 +55,7 @@ document.getElementById("open-status").addEventListener("click", async () => {
   statusDialog.showModal();
 });
 document.getElementById("close-status").addEventListener("click", () => statusDialog.close());
+document.getElementById("close-trace").addEventListener("click", () => traceDialog.close());
 document.getElementById("run-check").addEventListener("click", async (e) => {
   const button = e.currentTarget;
   button.disabled = true;
@@ -366,16 +368,30 @@ function answerFrame(agent) {
   return { node, body, meta };
 }
 
-function answerView({ agent, content, model, reports, links }) {
+function answerView({ agent, content, model, reports, links, seconds, llm_calls, trace_id }) {
   const { node, body, meta } = answerFrame(agent);
   const searches = reports.reduce((n, r) => n + r.steps.length, 0);
   const members = new Set(reports.map((r) => r.source)).size;
   const followups = reports.filter((r) => r.request).length;
-  meta.textContent = [model, `所員${members}人`, `検索${searches}回`, followups && `再調査${followups}件`].filter(Boolean).join(" · ");
+  meta.textContent = [
+    model,
+    seconds !== undefined && formatSeconds(seconds),
+    `所員${members}人`,
+    `検索${searches}回`,
+    followups && `再調査${followups}件`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   const answer = markdownView(content);
   const actions = el("div", "answer-actions");
   actions.append(copyButton(content));
+  if (trace_id) {
+    const button = el("button", "", `LLMとのやりとり（${llm_calls}回）`);
+    button.type = "button";
+    button.addEventListener("click", () => openTrace(trace_id));
+    actions.append(button);
+  }
   // 照合の結果がない（照合を入れる前の）回答には何も出さない
   if (links) actions.append(markLinks(answer, links));
   const record = el("details", "record");
@@ -442,7 +458,7 @@ function progressView() {
     } else if (event.type === "member_done") {
       const r = event.report;
       const row = rowFor(r.source);
-      row.set(r.error ? "failed" : "done", r.error ? "失敗" : "報告済み", r.error ? "" : `検索${r.steps.length}回`);
+      row.set(r.error ? "failed" : "done", r.error ? "失敗" : "報告済み", r.error ? "" : memberNote(r));
     } else if (event.type === "director_start") {
       directorName = event.agent;
       meta.textContent = "報告をまとめています…";
@@ -495,7 +511,7 @@ function memberView(report) {
     row.node.append(el("div", "member-report error-text", report.error));
     return row.node;
   }
-  row.set(report.request ? "followup" : "done", report.request ? "再調査" : "報告", `検索${report.steps.length}回`);
+  row.set(report.request ? "followup" : "done", report.request ? "再調査" : "報告", memberNote(report));
   const details = el("details");
   details.append(el("summary", "", "検索の過程と報告"));
   const steps = el("div", "steps");
@@ -507,12 +523,64 @@ function memberView(report) {
   return row.node;
 }
 
+function memberNote(report) {
+  return [`検索${report.steps.length}回`, report.seconds !== undefined && formatSeconds(report.seconds)].filter(Boolean).join(" · ");
+}
+
+function formatSeconds(seconds) {
+  return seconds < 60 ? `${seconds.toFixed(1)}秒` : `${Math.floor(seconds / 60)}分${Math.round(seconds % 60)}秒`;
+}
+
 function stepView(step) {
   const node = el("div", "step");
   const call = el("div", "step-call");
   const args = Object.entries(step.args).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`);
   call.append(el("b", "", step.tool), ` ${args.join(" / ")}`);
+  if (step.seconds !== undefined) call.append(` （${formatSeconds(step.seconds)}）`);
   node.append(call, el("pre", "", step.result || "（結果なし）"));
+  return node;
+}
+
+// ---- LLMとのやりとり ----
+
+const ROLE_LABELS = { system: "指示（システム）", human: "依頼", ai: "LLM", tool: "ツールの結果" };
+
+async function openTrace(traceId) {
+  const calls = await api("GET", `/api/traces/${traceId}`);
+  const total = calls.reduce((n, c) => n + c.seconds, 0);
+  const tokens = calls.reduce((n, c) => n + (c.input_tokens ?? 0) + (c.output_tokens ?? 0), 0);
+  document.getElementById("trace-summary").textContent =
+    `LLMを${calls.length}回呼び、応答待ちは合計${formatSeconds(total)}でした（所員は並列に動くので、実際にかかった時間より長くなります）。` +
+    (tokens ? ` トークンは合計${tokens.toLocaleString()}です。` : "");
+  document.getElementById("trace-list").replaceChildren(...calls.map(callView));
+  traceDialog.showModal();
+}
+
+function callView(call, index) {
+  const node = el("details", "call");
+  const summary = el("summary");
+  const tokens = call.input_tokens != null ? `入力${call.input_tokens} / 出力${call.output_tokens}トークン` : "";
+  const result = call.response.tool_calls ? `ツールを呼んだ: ${call.response.tool_calls.map((c) => c.name).join(", ")}` : "文章で答えた";
+  summary.append(
+    el("span", "call-index", `${index + 1}`),
+    el("b", "", call.who),
+    el("span", "call-meta", [formatSeconds(call.seconds), tokens, result].filter(Boolean).join(" · ")),
+  );
+  node.append(summary);
+  if (call.tools.length) node.append(el("div", "call-tools", `渡したツール: ${call.tools.join(", ")}`));
+  for (const m of call.messages) node.append(messageView(m));
+  const response = messageView(call.response);
+  response.classList.add("response");
+  node.append(response);
+  return node;
+}
+
+function messageView(m) {
+  const node = el("div", `call-message ${m.role}`);
+  node.append(el("div", "call-role", ROLE_LABELS[m.role] ?? m.role));
+  let text = m.content;
+  if (m.tool_calls) text += (text ? "\n" : "") + m.tool_calls.map((c) => `→ ${c.name}(${JSON.stringify(c.args)})`).join("\n");
+  node.append(el("pre", "", text || "（空）"));
   return node;
 }
 
