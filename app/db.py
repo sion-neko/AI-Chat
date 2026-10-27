@@ -173,6 +173,12 @@ def delete_conversation(conv_id: str):
         conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
 
 
+def delete_empty_conversations():
+    """ターンが1つもない会話を消す。最初の調査の途中でアプリが止まると残る（起動したときに呼ぶ）。"""
+    with connect() as conn:
+        conn.execute("DELETE FROM conversations WHERE NOT EXISTS (SELECT 1 FROM turns WHERE turns.conversation_id = conversations.id)")
+
+
 # ---- フォルダ ----
 
 

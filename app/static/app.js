@@ -311,8 +311,21 @@ function lostJobs() {
   for (const job of lost) jobs.delete(job.turnId);
   refreshList();
   refreshFolders();
-  if (lost.some((j) => j.conversationId === currentId)) openConversation(currentId);
+  updateTitle();
   setSendButton();
+  // 終わっていれば開き直すと回答が出る。最初の調査の途中でサーバーが止まった会話は、もうない
+  const current = lost.find((j) => j.conversationId === currentId);
+  if (current) {
+    // 回答が保存されていなければ（中断された）、質問を入力欄に戻して聞き直せるようにする
+    const restore = () => current.mine && restoreQuestion(current.mine.content, current.mine.images);
+    openConversation(currentId)
+      .then(() => !current.info.replace && turnCount <= current.info.index && restore())
+      .catch(() => {
+        startNew(viewFolderId);
+        restore();
+      });
+  }
+  toast("つなぎ直しました", "アプリが止まっていた間の調査は、終わっていなければ中断されています。", null);
 }
 
 function finishJob(job, event) {

@@ -524,6 +524,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 urls = [_data_url(mime, data) for mime, data in images or []]
                 turn = agent.run_turn(history, question, selected, emit, scopes, clarify, memos_for(conv_id, None), urls, since)
+                # 最後のLLMの呼び出しの間に中止された（会話が消された）なら保存しない
+                if job.cancel.is_set():
+                    raise agent.Cancelled
                 turn["trace_id"] = db.save_trace(conv_id, turn.pop("trace"))
                 if "memo_notes" in turn:
                     turn["memo_added"] = add_to_memo(conv_id, turn.pop("memo_notes"))
@@ -580,6 +583,8 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     db.init()
+    # 調査中に止まったときの、最初の回答が出る前の会話（中身がない）を片付ける
+    db.delete_empty_conversations()
     port = int(os.environ.get("PORT", "8080"))
     print(f"listening on :{port} (model={os.environ['LLM_MODEL']}, db={db.DB_PATH})")
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()

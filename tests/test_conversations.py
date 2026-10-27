@@ -33,6 +33,10 @@ class ConversationsTest(unittest.TestCase):
         self.assertEqual(self.titles("100%_done"), ["ディスク増設どうなった？"])
         self.assertEqual(self.titles("%"), ["ディスク増設どうなった？"])
 
+    def test_delete_empty_conversations(self):
+        db.delete_empty_conversations()
+        self.assertEqual(self.titles(), ["ディスク増設どうなった？"])
+
     def test_rename_and_archive(self):
         db.update_conversation(self.vpn, archived=True, title="VPN証明書")
         self.assertEqual(self.titles(), ["ディスク増設どうなった？"])
