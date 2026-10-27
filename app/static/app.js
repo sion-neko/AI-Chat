@@ -101,6 +101,7 @@ input.addEventListener("keydown", (e) => {
     e.preventDefault();
     // 調査中のEnterで中止にならないよう、送れるときだけ送る
     if (!busy()) form.requestSubmit();
+    else if (input.value.trim()) explainBusy();
   }
 });
 
@@ -115,6 +116,11 @@ let submitting = false;
 // 開いている会話で調査中か、質問を送っている途中。やり直しや続報はできない
 function busy() {
   return Boolean(currentJob()) || submitting;
+}
+
+// 調査中に送ろうとしたときに、なぜ送れないかを出す（入力した文章はそのまま残る）
+function explainBusy() {
+  showComposerStatus("まだ調べています。終わるか中止してから送れます");
 }
 
 function jobFor(conversationId) {
@@ -1414,7 +1420,7 @@ function showFollowupOnLast() {
 }
 
 function askFollowup() {
-  if (busy()) return;
+  if (busy()) return explainBusy();
   ask("その後どうなった？", null, false, [], [], true);
 }
 
@@ -1433,7 +1439,8 @@ function confirmRedo(index) {
 
 // 画像はサーバーが元の質問のものを使い直すので、送らずに見せるだけ
 function redo(content, index, skipClarify = false) {
-  if (busy() || !confirmRedo(index)) return;
+  if (busy()) return explainBusy();
+  if (!confirmRedo(index)) return;
   const node = log.querySelector(`.turn[data-index="${index}"]`);
   ask(content, index, skipClarify, [], turnImages(index), Boolean(node?.followup));
 }
@@ -1449,7 +1456,7 @@ function setPlaceholder(lastTurn) {
 }
 
 function editQuestion(node, question, index) {
-  if (busy()) return;
+  if (busy()) return explainBusy();
   const row = node.querySelector(".question-row");
   const editor = el("div", "question-editor");
   const field = el("textarea");
