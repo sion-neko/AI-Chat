@@ -7,6 +7,9 @@
   2. 所長が所員の報告を読む。足りなければ所員に再調査を頼める（FOLLOWUP_ROUNDS 回まで）
      再調査では、その所員の前回の報告と所長の依頼を渡す
   3. 所長が報告をまとめて回答する
+  4. 所長が、次の調査でも役に立つ前提（社内の呼び方や話のありか等）を事務所のメモに書き足す
+
+所長と所員のプロンプトには、事務所のメモ（全体と、調査が入っているフォルダの分）を入れる。
 
 進み具合は emit に渡したイベントで通知する。
 LLMとのやりとりは Trace に記録し、返り値の trace に入れる（あとから画面で確かめられるように）。
@@ -103,6 +106,25 @@ INTAKE_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name}�
 - 聞き返すときは、答えやすいよう候補や例を添える
 - 聞き返さないときは、何も呼ばずに「調査します」とだけ答える"""
 
+REMEMBER_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name}」です。
+調査を終えたところです。次の調査でも役に立つ「前提」があれば、remember で事務所のメモに書き足します。今日は {today} です。
+
+書き足すもの:
+- 社内での呼び方と、正式な名前・システム名・リポジトリ名などの対応（例:「監視サーバー」は mon01）
+- ある話題が、どのソース・リポジトリ・チャンネルにあるか
+- 誰が何の担当か
+- 依頼人が示した、回答の書き方の好み
+書き足さないもの:
+- 今回の質問への答えそのもの（調査の記録に残るので不要）
+- その時だけの状況（「今は障害対応中」など）、推測、メモにすでにあること
+
+- 1件は1行で短く書く。書き足すのは多くても{limit}件
+- {scopes}
+- 書き足すことがなければ、何も呼ばずに「なし」とだけ答える"""
+
+# 1回の調査でメモに書き足す件数の上限
+REMEMBER_LIMIT = 3
+
 _llm = ChatOpenAI(
     base_url=os.environ["LLM_BASE_URL"],
     api_key=os.environ["LLM_API_KEY"],
@@ -137,11 +159,13 @@ def run_member(
     trace: Trace,
     scope: list[str] | None = None,
     followup: dict | None = None,
+    memo: str = "",
 ) -> dict:
     """所員1人に調査させ、報告を返す。失敗しても例外は投げず、error に入れて返す。
 
     scope は画面で選んだ検索範囲（リポジトリやチャンネル）。None なら絞らない。
     followup は所長からの再調査の依頼 {"instruction": 依頼, "previous": 前回の報告}。
+    memo はプロンプトに足す事務所のメモ（memo_section で作る）。
     """
     character = characters.member(source.id, source.label)
     report = {"source": source.id, "label": source.label, "agent": character.name, "content": "", "steps": [], "error": None}
@@ -151,7 +175,7 @@ def run_member(
         report["request"] = followup["instruction"]
     emit({"type": "member_start", "source": source.id, "agent": character.name})
 
-    prompt = MEMBER_PROMPT.format(name=character.name, persona=character.persona, source=source.label, today=date.today())
+    prompt = MEMBER_PROMPT.format(name=character.name, persona=character.persona, source=source.label, today=date.today()) + memo
     *earlier, current = questions
     request = f"今回の質問: {current}"
     if earlier:
@@ -236,12 +260,13 @@ def run_director(
     sources: list[Source],
     emit: Emit,
     trace: Trace,
+    memo: str = "",
 ) -> dict:
     """所長が報告を読み、必要なら再調査を頼んでから回答する。
 
     history は過去のターン（質問と所長の回答）。返り値の followups は再調査で増えた報告。
     """
-    prompt = DIRECTOR_PROMPT.format(name=director.name, persona=director.persona, today=date.today())
+    prompt = DIRECTOR_PROMPT.format(name=director.name, persona=director.persona, today=date.today()) + memo
     messages = [SystemMessage(prompt), *_history_messages(history)]
 
     sections = [f"### {r['agent']}（{r['label']}、ソースID: {r['source']}）\n{_report_text(r)}" for r in reports]
@@ -264,7 +289,8 @@ def run_director(
             source = by_id[call["args"]["source"]]
             emit({"type": "followup", "source": source.id, "agent": latest[source.id]["agent"], "instruction": call["args"]["instruction"]})
             previous = _report_text(latest[source.id])
-            return run_member(source, questions, emit, trace, latest[source.id].get("scope"), {"instruction": call["args"]["instruction"], "previous": previous})
+            request = {"instruction": call["args"]["instruction"], "previous": previous}
+            return run_member(source, questions, emit, trace, latest[source.id].get("scope"), request, memo)
 
         with ThreadPoolExecutor(max_workers=len(calls) or 1) as pool:
             results = dict(zip((c["id"] for c in calls), pool.map(follow, calls)))
@@ -310,12 +336,13 @@ def _history_messages(history: list[dict]) -> list:
     return [HumanMessage(t["content"]) if t["role"] == "user" else AIMessage(t["content"]) for t in history]
 
 
-def intake(director: characters.Character, history: list[dict], question: str, trace: Trace) -> dict | None:
+def intake(director: characters.Character, history: list[dict], question: str, trace: Trace, memo: str = "") -> dict | None:
     """聞き返すべきなら {"question": 依頼人への質問, "model": 応答したモデル} を返す。調べてよければ None。
 
     受付は補助なので、LLMの呼び出しに失敗しても調査は止めない（None を返す）。
+    メモに用語の対応などがあれば、それで分かる依頼は聞き返さない。
     """
-    prompt = INTAKE_PROMPT.format(name=director.name, persona=director.persona, today=date.today())
+    prompt = INTAKE_PROMPT.format(name=director.name, persona=director.persona, today=date.today()) + memo
     messages = [SystemMessage(prompt), *_history_messages(history), HumanMessage(question)]
     started = time.monotonic()
     try:
@@ -328,6 +355,77 @@ def intake(director: characters.Character, history: list[dict], question: str, t
             model = answer.response_metadata.get("model_name") or os.environ.get("LLM_MODEL", "")
             return {"question": call["args"]["question"].strip(), "model": model}
     return None
+
+
+def memo_section(memos: dict | None) -> str:
+    """プロンプトの最後に足す、事務所のメモ。memos は {"global": 全体のメモ, "folder": {"name", "memo"} か None}。"""
+    if not memos:
+        return ""
+    parts = []
+    if memos.get("global"):
+        parts.append(f"### 全体\n{memos['global']}")
+    if folder := memos.get("folder"):
+        parts.append(f"### 案件「{folder['name']}」\nこの調査は案件「{folder['name']}」のものです。\n{folder['memo']}".rstrip())
+    if not parts:
+        return ""
+    return (
+        "\n\n## 事務所のメモ\n"
+        "過去の調査で分かった前提（社内の呼び方、話がどこにあるか等）や、依頼人の好みです。"
+        "検索語の言い換え、どこを調べるかの判断、回答の書き方に使ってください。"
+        "ただしメモは回答の根拠にはせず、事実は必ず検索結果で確かめてください。\n\n" + "\n\n".join(parts)
+    )
+
+
+def _remember_tool(has_folder: bool) -> dict:
+    scopes = ["folder", "global"] if has_folder else ["global"]
+    return {
+        "type": "function",
+        "function": {
+            "name": "remember",
+            "description": "事務所のメモに1行書き足す",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "enum": scopes, "description": "folder: この案件のメモ / global: すべての調査で使うメモ"},
+                    "note": {"type": "string", "description": "書き足す1行"},
+                },
+                "required": ["scope", "note"],
+            },
+        },
+    }
+
+
+def remember(
+    director: characters.Character, questions: list[str], answer: str, memos: dict | None, trace: Trace, memo: str
+) -> list[dict]:
+    """調査を終えて、メモに書き足すことを決める。[{"scope": "folder" か "global", "note"}] を返す。
+
+    書き足すかどうかを依頼人に確かめはしない（書いたものは画面に出し、メモの画面で直せる）。
+    メモは補助なので、LLMの呼び出しに失敗しても何も書かずに終える。
+    """
+    has_folder = bool(memos and memos.get("folder"))
+    scopes = (
+        f"案件「{memos['folder']['name']}」だけの前提は folder、どの調査にも効くこと（依頼人の好みなど）は global に書く"
+        if has_folder
+        else "この調査はフォルダに入っていないので、どの調査にも効くことだけを global に書く"
+    )
+    prompt = REMEMBER_PROMPT.format(name=director.name, today=date.today(), limit=REMEMBER_LIMIT, scopes=scopes) + memo
+    asked = "\n".join(f"- {q}" for q in questions)
+    messages = [SystemMessage(prompt), HumanMessage(f"## 依頼人の質問\n{asked}\n\n## あなたの回答\n{answer}")]
+    tool = _remember_tool(has_folder)
+    started = time.monotonic()
+    try:
+        response = _llm.bind_tools([tool]).invoke(messages)
+    except Exception:
+        return []
+    trace.record(f"{director.name}所長（メモ）", messages, [tool], response, time.monotonic() - started)
+    allowed = tool["function"]["parameters"]["properties"]["scope"]["enum"]
+    notes = []
+    for call in response.tool_calls:
+        note = " ".join(str(call["args"].get("note", "")).split())
+        if call["name"] == "remember" and call["args"].get("scope") in allowed and note:
+            notes.append({"scope": call["args"]["scope"], "note": note})
+    return notes[:REMEMBER_LIMIT]
 
 
 def member_questions(history: list[dict], question: str) -> list[str]:
@@ -351,10 +449,12 @@ def run_turn(
     emit: Emit,
     scopes: dict[str, list[str]] | None = None,
     clarify: bool = True,
+    memos: dict | None = None,
 ) -> dict:
     """1ターン分の調査と回答。返り値は保存・表示用の assistant ターン。
 
     scopes はソースIDごとの検索範囲。書かれていないソースは絞らない。
+    memos は事務所のメモ（memo_section の形）。所長と所員のプロンプトに入る。
     clarify が False なら聞き返さない（依頼人が「聞き返さずに調べる」を選んだとき）。
     直前に聞き返したばかりのときも、続けては聞き返さない。
     聞き返したときは kind: "clarify" のターンを返す（reports などは持たない）。
@@ -364,10 +464,11 @@ def run_turn(
     started = time.monotonic()
     trace = Trace()
     director = characters.director()
+    memo = memo_section(memos)
 
     if clarify and not (history and history[-1].get("kind") == "clarify"):
         emit({"type": "intake_start", "agent": director.name})
-        if ask := intake(director, history, question, trace):
+        if ask := intake(director, history, question, trace, memo):
             return {
                 "role": "assistant",
                 "kind": "clarify",
@@ -381,17 +482,22 @@ def run_turn(
 
     questions = member_questions(history, question)
     with ThreadPoolExecutor(max_workers=len(sources)) as pool:
-        reports = list(pool.map(lambda s: run_member(s, questions, emit, trace, (scopes or {}).get(s.id)), sources))
+        reports = list(pool.map(lambda s: run_member(s, questions, emit, trace, (scopes or {}).get(s.id), memo=memo), sources))
 
     emit({"type": "director_start", "agent": director.name})
-    answer = run_director(director, history, questions, reports, sources, emit, trace)
+    answer = run_director(director, history, questions, reports, sources, emit, trace, memo)
     reports += answer.pop("followups")
+
+    emit({"type": "memo_start", "agent": director.name})
+    notes = remember(director, questions, answer["content"], memos, trace, memo)
     return {
         "role": "assistant",
         "agent": director.name,
         **answer,
         "reports": reports,
         "links": links.verify(answer["content"], reports),
+        # メモに書き足す内容。書き足すのは保存する側（メモの上限を見て、書けたかどうかに置き換える）
+        "memo_notes": notes,
         "seconds": round(time.monotonic() - started, 2),
         "llm_calls": len(trace.calls),
         "trace": trace.calls,

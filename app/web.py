@@ -2,10 +2,15 @@
 
 API:
   GET    /api/config
-  GET    /api/conversations?q=&archived=1 会話一覧。q は空白区切りのAND（tag:名前 でタグ、それ以外はタイトルと中身）
-  PATCH  /api/conversations/{id}          {title?, archived?, tags?} 名前・アーカイブ・タグを変える
-  GET    /api/tags                        使われているタグの一覧
-  POST   /api/conversations               {content, sources} 新しい会話を作って最初の質問をする
+  GET    /api/conversations?q=&archived=1&folder= 会話一覧。q は空白区切りのANDで、タイトルと中身を探す。folder でフォルダを絞る
+  PATCH  /api/conversations/{id}          {title?, archived?, folder_id?} 名前・アーカイブ・フォルダを変える（folder_id: null でフォルダの外へ）
+  POST   /api/conversations               {content, sources, folder_id?} 新しい会話を作って最初の質問をする
+  GET    /api/folders                     フォルダの一覧
+  POST   /api/folders                     {name} フォルダを作る
+  PATCH  /api/folders/{id}                {name?, memo?, selection?}
+  DELETE /api/folders/{id}                フォルダを消す（中の調査はフォルダの外に出る）
+  GET    /api/settings                    {memo, selection} 全体のメモと、フォルダの外で選んだソースと範囲
+  PATCH  /api/settings                    {memo?, selection?}
   GET    /api/conversations/{id}          会話の中身（ターン単位）
   GET    /api/traces/{trace_id}           1ターン分のLLMとのやりとり
   POST   /api/conversations/{id}/messages {content, sources, from_turn?} 続きの質問をする
@@ -21,6 +26,7 @@ API:
 
 skip_clarify: true なら所長は聞き返さずに調べる。
 sources は検索に使うソースIDの配列。scopes は {ソースID: [リポジトリやチャンネルの名前]}（省略可。ないソースは絞らない）。
+selection は入力欄の選択を覚えておく形 {"unchecked": [外したソースID], "scopes": {ソースID: [名前]}}。
 
 質問するPOSTは、進み具合をNDJSON（1行1イベント）で逐次返す。
   {"type": "start", "turn_id"}                  調査を始めた。中止するときに turn_id を使う
@@ -31,6 +37,7 @@ sources は検索に使うソースIDの配列。scopes は {ソースID: [リ�
   {"type": "director_start", "agent"}           所長がまとめ始めた（再調査の後にもう一度来る）
   {"type": "followup", "source", "agent", "instruction"}  所長が所員に再調査を頼んだ（続いて member_start 〜 member_done が来る）
   {"type": "delta", "text"}                    所長の回答の続き（director_start で書き直しになる）
+  {"type": "memo_start", "agent"}               所長がメモに書き足すことを考えている
   {"type": "done", "conversation_id", "turn"}   回答（保存済み）
   {"type": "cancelled"}                         中止した（何も保存しない。新しい会話なら会話ごと消す）
   {"type": "error", "message"}
@@ -54,34 +61,107 @@ from app import agent, characters, db, sources
 STATIC_DIR = Path(__file__).parent / "static"
 CONTENT_TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
 TITLE_LENGTH = 40
-TAG_LENGTH = 20
-TAG_COUNT = 10
+FOLDER_NAME_LENGTH = 40
+# メモはそのままプロンプトに入るので、ローカルLLMの文脈を使い切らない長さに抑える
+MEMO_LENGTH = 2000
 
 
 class InputError(Exception):
     """リクエストの中身が不正。メッセージはそのまま画面に出る。"""
 
 
+def _name(value, length: int) -> str:
+    name = str(value).strip()
+    if not name:
+        raise InputError("名前を入れてください")
+    return name[:length]
+
+
+def _folder_id(value) -> str | None:
+    if value is None:
+        return None
+    if not db.get_folder(str(value)):
+        raise InputError("そのフォルダはありません")
+    return str(value)
+
+
+def _memo(value) -> str:
+    memo = str(value).strip()
+    if len(memo) > MEMO_LENGTH:
+        raise InputError(f"メモは{MEMO_LENGTH}文字以内にしてください（今は{len(memo)}文字）")
+    return memo
+
+
+def _selection(value) -> dict:
+    """入力欄の選択（外したソースと範囲）を確かめる。中のIDや名前が今使えるかまでは見ない（使うときに確かめる）。"""
+    if not isinstance(value, dict):
+        raise InputError("選択の形が正しくありません")
+    unchecked = value.get("unchecked", [])
+    scopes = value.get("scopes", {})
+    if not (isinstance(unchecked, list) and all(isinstance(s, str) for s in unchecked)):
+        raise InputError("選択の形が正しくありません")
+    if not (isinstance(scopes, dict) and all(isinstance(v, list) and all(isinstance(n, str) for n in v) for v in scopes.values())):
+        raise InputError("選択の形が正しくありません")
+    return {"unchecked": unchecked, "scopes": {k: v for k, v in scopes.items() if v}}
+
+
 def conversation_changes(req: dict) -> dict:
-    """会話の名前・アーカイブ・タグの変更を確かめて、db.update_conversation に渡せる形にする。"""
+    """会話の名前・アーカイブ・フォルダの変更を確かめて、db.update_conversation に渡せる形にする。"""
     changes = {}
     if "title" in req:
-        title = str(req["title"]).strip()
-        if not title:
-            raise InputError("名前を入れてください")
-        changes["title"] = title[:TITLE_LENGTH * 2]
+        changes["title"] = _name(req["title"], TITLE_LENGTH * 2)
     if "archived" in req:
         changes["archived"] = bool(req["archived"])
-    if "tags" in req:
-        if not isinstance(req["tags"], list):
-            raise InputError("タグは配列で送ってください")
-        tags = list(dict.fromkeys(str(t).strip().removeprefix("tag:") for t in req["tags"] if str(t).strip()))
-        if any(len(t) > TAG_LENGTH or " " in t for t in tags):
-            raise InputError(f"タグは空白なしの{TAG_LENGTH}文字以内にしてください")
-        if len(tags) > TAG_COUNT:
-            raise InputError(f"タグは{TAG_COUNT}個までにしてください")
-        changes["tags"] = tags
+    if "folder_id" in req:
+        changes["folder_id"] = _folder_id(req["folder_id"])
     return changes
+
+
+def folder_changes(req: dict) -> dict:
+    changes = {}
+    if "name" in req:
+        changes["name"] = _name(req["name"], FOLDER_NAME_LENGTH)
+    if "memo" in req:
+        changes["memo"] = _memo(req["memo"])
+    if "selection" in req:
+        changes["selection"] = _selection(req["selection"])
+    return changes
+
+
+def settings() -> dict:
+    return {"memo": db.get_setting("memo", ""), "selection": db.get_setting("selection", {})}
+
+
+def add_to_memo(conv_id: str, notes: list[dict]) -> list[dict]:
+    """所長が決めた内容をメモに書き足す。上限を超えるものは書かない。
+
+    返り値は [{"scope", "note", "folder"（フォルダ名。全体なら None）, "saved"}]。画面に出す。
+    """
+    folder = db.get_folder((db.get_conversation(conv_id) or {}).get("folder_id") or "")
+    result = []
+    for n in notes:
+        target = folder if n["scope"] == "folder" else None
+        if n["scope"] == "folder" and not folder:
+            continue
+        current = target["memo"] if target else db.get_setting("memo", "")
+        memo = f"{current}\n- {n['note']}".strip()
+        saved = len(memo) <= MEMO_LENGTH
+        if saved and target:
+            db.update_folder(target["id"], memo=memo)
+            target["memo"] = memo
+        elif saved:
+            db.set_setting("memo", memo)
+        result.append({"scope": n["scope"], "note": n["note"], "folder": target["name"] if target else None, "saved": saved})
+    return result
+
+
+def memos_for(conv_id: str | None, folder_id: str | None) -> dict:
+    """調査のプロンプトに入れるメモ。会話がフォルダに入っていれば、そのフォルダのメモも。"""
+    if conv_id:
+        folder_id = (db.get_conversation(conv_id) or {}).get("folder_id")
+    folder = db.get_folder(folder_id) if folder_id else None
+    return {"global": db.get_setting("memo", ""), "folder": {"name": folder["name"], "memo": folder["memo"]} if folder else None}
+
 
 # 調査中のターン。turn_id → 中止の合図
 RUNNING: dict[str, threading.Event] = {}
@@ -168,9 +248,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/config":
             return self._send_json(200, config())
         if url.path == "/api/conversations":
-            return self._send_json(200, db.list_conversations(query.get("q", ""), query.get("archived") == "1"))
-        if self.path == "/api/tags":
-            return self._send_json(200, db.all_tags())
+            convs = db.list_conversations(query.get("q", ""), query.get("archived") == "1", query.get("folder") or None)
+            return self._send_json(200, convs)
+        if self.path == "/api/folders":
+            return self._send_json(200, db.list_folders())
+        if self.path == "/api/settings":
+            return self._send_json(200, settings())
         if self.path == "/api/characters":
             return self._send_json(200, character_list())
         if m := re.fullmatch(r"/api/sources/(\w+)/scopes", self.path):
@@ -200,7 +283,8 @@ class Handler(BaseHTTPRequestHandler):
             # 会話を作る前に検証する（使えないソースで空の会話が残らないように）
             selected = sources.resolve(req["sources"])
             scopes = sources.resolve_scopes(selected, req.get("scopes") or {})
-            conv_id = db.create_conversation(req["content"][:TITLE_LENGTH])
+            folder_id = _folder_id(req.get("folder_id"))
+            conv_id = db.create_conversation(req["content"][:TITLE_LENGTH], folder_id)
             return self._stream_turn(conv_id, [], req["content"], selected, scopes, is_new=True, clarify=not req.get("skip_clarify"))
         if m := re.fullmatch(r"/api/conversations/(\w+)/messages", self.path):
             history = db.load_turns(m[1])
@@ -217,6 +301,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._stream_turn(
                 m[1], history, req["content"], selected, scopes, is_new=False, replace_from=start, clarify=not req.get("skip_clarify")
             )
+        if self.path == "/api/folders":
+            folder_id = db.create_folder(_name(self._read_json().get("name", ""), FOLDER_NAME_LENGTH))
+            return self._send_json(200, db.get_folder(folder_id))
         if self.path == "/api/check":
             return self._send_json(200, check())
         if m := re.fullmatch(r"/api/turns/(\w+)/cancel", self.path):
@@ -230,6 +317,17 @@ class Handler(BaseHTTPRequestHandler):
             if not db.update_conversation(m[1], **conversation_changes(self._read_json())):
                 return self._send_json(404, {"error": "not found"})
             return self._send_json(200, {})
+        if m := re.fullmatch(r"/api/folders/(\w+)", self.path):
+            if not db.update_folder(m[1], **folder_changes(self._read_json())):
+                return self._send_json(404, {"error": "not found"})
+            return self._send_json(200, db.get_folder(m[1]))
+        if self.path == "/api/settings":
+            req = self._read_json()
+            if "memo" in req:
+                db.set_setting("memo", _memo(req["memo"]))
+            if "selection" in req:
+                db.set_setting("selection", _selection(req["selection"]))
+            return self._send_json(200, settings())
         self.send_error(404)
 
     def _put(self):
@@ -244,6 +342,9 @@ class Handler(BaseHTTPRequestHandler):
     def _delete(self):
         if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
             db.delete_conversation(m[1])
+            return self._send_json(200, {})
+        if m := re.fullmatch(r"/api/folders/(\w+)", self.path):
+            db.delete_folder(m[1])
             return self._send_json(200, {})
         if m := re.fullmatch(r"/api/characters/(\w+)", self.path):
             if not _character_key(m[1]):
@@ -279,8 +380,10 @@ class Handler(BaseHTTPRequestHandler):
 
         def work():
             try:
-                turn = agent.run_turn(history, question, selected, emit, scopes, clarify)
+                turn = agent.run_turn(history, question, selected, emit, scopes, clarify, memos_for(conv_id, None))
                 turn["trace_id"] = db.save_trace(conv_id, turn.pop("trace"))
+                if "memo_notes" in turn:
+                    turn["memo_added"] = add_to_memo(conv_id, turn.pop("memo_notes"))
                 new_turns = [{"role": "user", "content": question}, turn]
                 if replace_from is None:
                     db.append_turns(conv_id, new_turns)

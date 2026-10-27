@@ -26,9 +26,10 @@ SCOPED = Source(id="scoped", label="範囲つき", tools=[search_scoped], config
 class FakeLLM:
     """ツールを渡されたかどうかと会話の中身から、決まった応答を返すLLM。"""
 
-    def __init__(self, director_requests: list[dict], ask: str | None = None):
+    def __init__(self, director_requests: list[dict], ask: str | None = None, notes: list[dict] | None = None):
         self.director_requests = director_requests
         self.ask = ask  # 受付で聞き返す内容（None なら聞き返さない）
+        self.notes = notes or []  # 調査のあとにメモへ書き足す内容（remember の引数）
         self.tools = []
         self.director_calls = 0
 
@@ -49,6 +50,8 @@ class FakeLLM:
             if self.ask:
                 return AIMessage("", tool_calls=[{"id": "a1", "name": "ask_user", "args": {"question": self.ask}}])
             return AIMessage("調査します")
+        if names == ["remember"]:  # 所長のメモ
+            return AIMessage("なし", tool_calls=[{"id": f"m{i}", "name": "remember", "args": a} for i, a in enumerate(self.notes)])
         if "request_reinvestigation" in names or not names:  # 所長
             root = getattr(self, "parent", self)
             root.director_calls += 1
@@ -84,10 +87,10 @@ class AgentTest(unittest.TestCase):
         self.assertEqual([r["source"] for r in turn["reports"]], ["dummy_chat", "dummy_wiki"])
         self.assertEqual(llm.director_calls, 1)
 
-        # 受付1回、所員2人 × (検索の判断 + 報告)、所長1回。誰の呼び出しかと、送った内容が残る
+        # 受付1回、所員2人 × (検索の判断 + 報告)、所長の回答1回とメモ1回。誰の呼び出しかと、送った内容が残る
         whos = [c["who"] for c in turn["trace"]]
-        self.assertEqual(turn["llm_calls"], 6)
-        self.assertCountEqual(whos, ["シロ所長（受付）", "シロ所長", "コソリ（ダミーWiki）", "コソリ（ダミーWiki）", "ポルタ（ダミーチャット）", "ポルタ（ダミーチャット）"])
+        self.assertEqual(turn["llm_calls"], 7)
+        self.assertCountEqual(whos, ["シロ所長（受付）", "シロ所長", "シロ所長（メモ）","コソリ（ダミーWiki）", "コソリ（ダミーWiki）", "ポルタ（ダミーチャット）", "ポルタ（ダミーチャット）"])
         director_call = turn["trace"][whos.index("シロ所長")]
         self.assertEqual(director_call["tools"], ["request_reinvestigation"])
         self.assertEqual(director_call["messages"][0]["role"], "system")
@@ -109,9 +112,9 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(llm.director_calls, agent.FOLLOWUP_ROUNDS + 1)
         types = [e["type"] for e in self.events]
         self.assertEqual(types.count("followup"), 1)
-        # 再調査の後にもう一度まとめ始め、回答が流れてくる
-        self.assertEqual(types[-2:], ["director_start", "delta"])
-        self.assertEqual(self.events[-1]["text"], "回答")
+        # 再調査の後にもう一度まとめ始め、回答が流れてきて、最後にメモを考える
+        self.assertEqual(types[-3:], ["director_start", "delta", "memo_start"])
+        self.assertEqual(self.events[-2]["text"], "回答")
 
     def test_scope_reaches_tools_in_each_member(self):
         llm = FakeLLM([{"source": "scoped", "instruction": "もう一度"}])
@@ -165,6 +168,44 @@ class AgentTest(unittest.TestCase):
         with mock.patch.object(agent, "_llm", llm):
             turn = agent.run_turn([], "ディスク", [dummy.CHAT], self.events.append)
         self.assertEqual(turn["content"], "回答")
+
+    def test_memo_reaches_every_prompt(self):
+        memos = {"global": "回答は結論から", "folder": {"name": "案件X", "memo": "- 「監視サーバー」は mon01 のこと"}}
+        with mock.patch.object(agent, "_llm", FakeLLM([])):
+            turn = agent.run_turn([], "監視サーバーどうなった？", [dummy.CHAT], self.events.append, memos=memos)
+        for call in turn["trace"]:
+            system = call["messages"][0]["content"]
+            self.assertIn("## 事務所のメモ", system, call["who"])
+            self.assertIn("回答は結論から", system)
+            self.assertIn("「監視サーバー」は mon01 のこと", system)
+            self.assertIn("この調査は案件「案件X」のものです", system)
+
+    def test_no_memo_section_without_memos(self):
+        self.assertEqual(agent.memo_section(None), "")
+        self.assertEqual(agent.memo_section({"global": "", "folder": None}), "")
+
+    def test_remember(self):
+        notes = [
+            {"scope": "folder", "note": "「監視サーバー」は\\n mon01 のこと"},
+            {"scope": "nope", "note": "範囲外"},
+            {"scope": "global", "note": " "},
+            {"scope": "global", "note": "回答は結論から"},
+        ]
+        memos = {"global": "", "folder": {"name": "案件X", "memo": ""}}
+        with mock.patch.object(agent, "_llm", FakeLLM([], notes=notes)):
+            turn = agent.run_turn([], "監視サーバーどうなった？", [dummy.CHAT], self.events.append, memos=memos)
+        # 不正なものは捨て、改行は詰める
+        self.assertEqual(turn["memo_notes"], [{"scope": "folder", "note": "「監視サーバー」は\\n mon01 のこと"}, {"scope": "global", "note": "回答は結論から"}])
+
+        # フォルダに入っていない調査では、フォルダのメモには書かない
+        with mock.patch.object(agent, "_llm", FakeLLM([], notes=notes)):
+            turn = agent.run_turn([], "監視サーバーどうなった？", [dummy.CHAT], self.events.append, memos={"global": "", "folder": None})
+        self.assertEqual(turn["memo_notes"], [{"scope": "global", "note": "回答は結論から"}])
+
+    def test_clarify_does_not_remember(self):
+        with mock.patch.object(agent, "_llm", FakeLLM([], ask="どの件ですか？", notes=[{"scope": "global", "note": "x"}])):
+            turn = agent.run_turn([], "あの件", [dummy.CHAT], self.events.append)
+        self.assertNotIn("memo_notes", turn)
 
     def test_cancel_stops_whole_turn(self):
         def emit(event):

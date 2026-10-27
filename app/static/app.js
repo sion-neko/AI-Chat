@@ -8,6 +8,11 @@ let showingArchive = false;
 let openedConversation = null;
 // 開いている会話に保存されているターンの数（次の質問の位置）
 let turnCount = 0;
+// フォルダの一覧と、サイドバーで選んでいるフォルダ（null は「すべての調査」）
+let folders = [];
+let viewFolderId = null;
+// 入力欄の選択 {unchecked: [外したソースID], scopes: {ソースID: [名前]}}。今のフォルダ（なければ全体）に保存する
+let selection = { unchecked: [], scopes: {} };
 // 所長の名前（回答の見出しに使う）と、ソースIDから画面の名前への対応
 let directorName = "所長";
 let sourceLabels = new Map();
@@ -16,7 +21,6 @@ const log = document.getElementById("log");
 const list = document.getElementById("conversations");
 const search = document.getElementById("search");
 const titleEl = document.getElementById("conversation-title");
-const tagsEl = document.getElementById("conversation-tags");
 const archiveButton = document.getElementById("archive");
 const form = document.getElementById("form");
 const input = document.getElementById("input");
@@ -26,12 +30,6 @@ const characterDialog = document.getElementById("characters");
 const statusDialog = document.getElementById("status");
 const traceDialog = document.getElementById("trace");
 
-// 外したソースはブラウザに覚えておく（新しく使えるようになったソースは選んだ状態で出す）
-const UNCHECKED_KEY = "unchecked-sources";
-// ソースごとに選んだ検索範囲 {ソースID: [名前]}。これもブラウザに覚えておく。ないソースは絞らない
-const SCOPES_KEY = "source-scopes";
-let selectedScopes = loadJson(SCOPES_KEY, {});
-
 // 最初の画面に出す質問の例
 const EXAMPLES = [
   "監視サーバーのディスク増設ってどうなった？",
@@ -39,16 +37,7 @@ const EXAMPLES = [
   "先月あった障害対応の経緯を教えて",
 ];
 
-loadConfig();
-refreshList();
-showEmpty();
-
-document.getElementById("new-chat").addEventListener("click", () => {
-  currentId = null;
-  showEmpty();
-  highlightCurrent();
-  input.focus();
-});
+document.getElementById("new-chat").addEventListener("click", () => startNew(viewFolderId));
 
 // 打つたびにサーバーで探す（中身まで探すので、打ち終わるのを少し待つ）
 let searchTimer = null;
@@ -70,7 +59,10 @@ archiveButton.addEventListener("click", async () => {
   await refreshList();
 });
 titleEl.addEventListener("click", renameConversation);
-sourceBox.addEventListener("change", saveSourceSelection);
+sourceBox.addEventListener("change", () => {
+  selection.unchecked = [...sourceBox.querySelectorAll("input:not(:checked)")].map((box) => box.value);
+  saveSelection();
+});
 
 document.getElementById("open-characters").addEventListener("click", async () => {
   renderCharacters(await api("GET", "/api/characters"));
@@ -126,7 +118,7 @@ form.addEventListener("submit", (e) => {
 async function ask(content, fromTurn, skipClarify = false) {
   if (document.getElementById("empty")) {
     log.replaceChildren();
-    renderHead({ title: content, tags: [] });
+    renderHead({ title: content });
   }
   if (fromTurn !== null) {
     // やり直す質問と、それより後のやりとりを画面から外す（失敗したら開き直して元に戻す）
@@ -141,7 +133,8 @@ async function ask(content, fromTurn, skipClarify = false) {
   setSendButton();
   try {
     const path = currentId ? `/api/conversations/${currentId}/messages` : "/api/conversations";
-    const body = { content, sources: selectedSources(), scopes: selectedScopes };
+    const body = { content, sources: selectedSources(), scopes: selection.scopes };
+    if (!currentId && viewFolderId) body.folder_id = viewFolderId;
     if (fromTurn !== null) body.from_turn = fromTurn;
     if (skipClarify) body.skip_clarify = true;
     let result = null;
@@ -165,7 +158,7 @@ async function ask(content, fromTurn, skipClarify = false) {
     setPlaceholder(result.turn);
     if (!currentId) {
       currentId = result.conversation_id;
-      await refreshList();
+      await Promise.all([refreshList(), refreshFolders()]);
       renderHead();
     }
   } catch (err) {
@@ -200,16 +193,47 @@ function restoreQuestion(content) {
 
 // ---- 設定とソース ----
 
+// 使えるソースの一覧（入力欄を描き直すときに使う）
+let sourceList = [];
+
 async function loadConfig() {
   const c = await api("GET", "/api/config");
   document.getElementById("model").textContent = c.model;
   directorName = c.director;
+  sourceList = c.sources;
   sourceLabels = new Map(c.sources.map((s) => [s.id, s.label]));
   renderSources(c.sources);
 }
 
+// 今のフォルダ。開いている調査があればそのフォルダ、なければサイドバーで選んでいるフォルダ
+function activeFolderId() {
+  return currentId ? (currentConversation()?.folder_id ?? null) : viewFolderId;
+}
+
+function activeFolder() {
+  return folders.find((f) => f.id === activeFolderId()) ?? null;
+}
+
+// 今のフォルダ（なければ全体）で覚えている選択を入力欄に出す
+async function applySelection() {
+  const saved = activeFolder()?.selection ?? (await api("GET", "/api/settings")).selection;
+  selection = { unchecked: saved.unchecked ?? [], scopes: saved.scopes ?? {} };
+  renderSources(sourceList);
+}
+
+// 入力欄の選択を、今のフォルダ（なければ全体）に保存する
+async function saveSelection() {
+  const folder = activeFolder();
+  if (folder) {
+    folder.selection = structuredClone(selection);
+    await api("PATCH", `/api/folders/${folder.id}`, { selection });
+  } else {
+    await api("PATCH", "/api/settings", { selection });
+  }
+}
+
 function renderSources(sources) {
-  const unchecked = new Set(loadJson(UNCHECKED_KEY, []));
+  const unchecked = new Set(selection.unchecked);
   sourceBox.replaceChildren(
     ...sources.map((s) => {
       const item = el("div", "source-item");
@@ -233,31 +257,12 @@ function renderSources(sources) {
 function scopeButton(source) {
   const button = el("button", "scope-button");
   button.type = "button";
-  const names = selectedScopes[source.id] ?? [];
+  const names = selection.scopes[source.id] ?? [];
   button.textContent = names.length ? (names.length === 1 ? names[0] : `${names[0]} ほか${names.length - 1}件`) : `すべての${source.scope_label}`;
   button.title = `${source.label}で調べる${source.scope_label}を選ぶ`;
   button.classList.toggle("narrowed", names.length > 0);
   button.addEventListener("click", () => openScope(source, button));
   return button;
-}
-
-function loadJson(key, fallback) {
-  try {
-    return JSON.parse(localStorage.getItem(key)) ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-// 保存できない環境では、開き直すたびに既定（すべて選ぶ・絞らない）に戻るだけ
-function saveJson(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {}
-}
-
-function saveSourceSelection() {
-  saveJson(UNCHECKED_KEY, [...sourceBox.querySelectorAll("input:not(:checked)")].map((box) => box.value));
 }
 
 // ---- 検索範囲の選択 ----
@@ -269,7 +274,7 @@ const scopeFilter = document.getElementById("scope-filter");
 let scopeEditing = null;
 
 async function openScope(source, button) {
-  scopeEditing = { source, button, choices: [], checked: new Set(selectedScopes[source.id] ?? []) };
+  scopeEditing = { source, button, choices: [], checked: new Set(selection.scopes[source.id] ?? []) };
   document.getElementById("scope-title").textContent = `${source.label}で調べる${source.scope_label}`;
   document.getElementById("scope-note").textContent = `選んだ${source.scope_label}だけを${source.agent}が調べます。何も選ばなければ、すべてを調べます。`;
   scopeFilter.value = "";
@@ -310,9 +315,9 @@ document.getElementById("scope-clear").addEventListener("click", () => {
 });
 document.getElementById("scope-done").addEventListener("click", () => {
   const { source, button, checked } = scopeEditing;
-  if (checked.size) selectedScopes[source.id] = [...checked];
-  else delete selectedScopes[source.id];
-  saveJson(SCOPES_KEY, selectedScopes);
+  if (checked.size) selection.scopes[source.id] = [...checked];
+  else delete selection.scopes[source.id];
+  saveSelection();
   button.replaceWith(scopeButton(source));
   scopeDialog.close();
 });
@@ -395,10 +400,24 @@ function currentConversation() {
   return conversations.find((c) => c.id === currentId) ?? openedConversation;
 }
 
+// 新しい調査を始める。folderId のフォルダに入る（null ならフォルダの外）
+function startNew(folderId) {
+  currentId = null;
+  viewFolderId = folderId;
+  showEmpty();
+  highlightCurrent();
+  renderFolders();
+  applySelection();
+  refreshList();
+  input.focus();
+}
+
 async function openConversation(id) {
   const data = await api("GET", `/api/conversations/${id}`);
+  const folderBefore = activeFolderId();
   currentId = id;
   openedConversation = conversations.find((c) => c.id === id) ?? null;
+  if (activeFolderId() !== folderBefore) applySelection();
   renderHead();
   const nodes = [];
   data.turns.forEach((t, i) => {
@@ -425,6 +444,7 @@ async function deleteConversation(id) {
 async function refreshList() {
   const params = new URLSearchParams({ q: search.value.trim() });
   if (showingArchive) params.set("archived", "1");
+  if (viewFolderId) params.set("folder", viewFolderId);
   conversations = await api("GET", `/api/conversations?${params}`);
   if (currentId) openedConversation = conversations.find((c) => c.id === currentId) ?? openedConversation;
   renderList();
@@ -440,7 +460,13 @@ function renderList() {
     nodes.push(conversationItem(c));
   }
   if (!conversations.length) {
-    const text = search.value.trim() ? "見つかりませんでした" : showingArchive ? "アーカイブした調査はありません" : "まだ調査はありません";
+    const text = search.value.trim()
+      ? "見つかりませんでした"
+      : showingArchive
+        ? "アーカイブした調査はありません"
+        : viewFolderId
+          ? "このフォルダにはまだ調査がありません"
+          : "まだ調査はありません";
     nodes.push(el("div", "conv-empty", text));
   }
   list.replaceChildren(...nodes);
@@ -464,7 +490,6 @@ function conversationItem(c) {
   title.type = "button";
   title.title = c.title;
   title.append(el("span", "conv-name", c.title));
-  for (const tag of c.tags) title.append(el("span", "conv-tag", tag));
   title.addEventListener("click", () => openConversation(c.id));
   const del = el("button", "conv-delete", "×");
   del.type = "button";
@@ -474,7 +499,159 @@ function conversationItem(c) {
   return item;
 }
 
-// ---- 開いている会話の見出し（名前・タグ・アーカイブ） ----
+// ---- フォルダ ----
+
+const folderList = document.getElementById("folder-list");
+const folderDialog = document.getElementById("folder-dialog");
+const crumb = document.getElementById("folder-crumb");
+const moveSelect = document.getElementById("move-folder");
+// 設定を開いているフォルダ
+let editingFolder = null;
+
+async function refreshFolders() {
+  folders = await api("GET", "/api/folders");
+  renderFolders();
+}
+
+function renderFolders() {
+  const item = (id, name, count) => {
+    const row = el("div", "folder-item");
+    row.classList.toggle("active", id === viewFolderId);
+    const open = el("button", "folder-open");
+    open.type = "button";
+    open.append(el("span", "folder-name", name));
+    if (count !== undefined) open.append(el("span", "folder-count", String(count)));
+    open.addEventListener("click", () => startNew(id));
+    row.append(open);
+    if (id) {
+      const settings = el("button", "folder-settings", "設定");
+      settings.type = "button";
+      settings.title = `「${name}」の名前・メモ・削除`;
+      settings.addEventListener("click", () => openFolderDialog(id));
+      row.append(settings);
+    }
+    return row;
+  };
+  folderList.replaceChildren(item(null, "すべての調査"), ...folders.map((f) => item(f.id, f.name, f.count)));
+}
+
+document.getElementById("new-folder").addEventListener("click", (e) => {
+  if (folderList.querySelector(".folder-input")) return;
+  const field = el("input", "folder-input");
+  field.placeholder = "フォルダの名前（案件名など）";
+  field.maxLength = 40;
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const name = field.value.trim();
+    field.remove();
+    if (!save || !name) return;
+    const folder = await api("POST", "/api/folders", { name });
+    await refreshFolders();
+    startNew(folder.id);
+  };
+  field.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.isComposing) finish(true);
+    if (ev.key === "Escape") finish(false);
+  });
+  field.addEventListener("blur", () => finish(true));
+  folderList.append(field);
+  field.focus();
+});
+
+function openFolderDialog(id) {
+  editingFolder = folders.find((f) => f.id === id);
+  document.getElementById("folder-name").value = editingFolder.name;
+  document.getElementById("folder-status").textContent = "";
+  folderDialog.showModal();
+}
+
+document.getElementById("close-folder").addEventListener("click", () => folderDialog.close());
+document.getElementById("folder-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("PATCH", `/api/folders/${editingFolder.id}`, { name: document.getElementById("folder-name").value });
+  } catch (err) {
+    document.getElementById("folder-status").textContent = err.message;
+    return;
+  }
+  folderDialog.close();
+  await refreshFolders();
+  renderHead();
+});
+document.getElementById("delete-folder").addEventListener("click", async () => {
+  if (!confirm(`フォルダ「${editingFolder.name}」を削除しますか？中の調査は消えず、フォルダの外に出ます。`)) return;
+  await api("DELETE", `/api/folders/${editingFolder.id}`);
+  folderDialog.close();
+  const wasViewing = viewFolderId === editingFolder.id;
+  await refreshFolders();
+  if (wasViewing) startNew(null);
+  else {
+    await refreshList();
+    renderHead();
+  }
+});
+
+// 開いている調査を別のフォルダへ移す
+moveSelect.addEventListener("change", async () => {
+  const c = currentConversation();
+  const folderId = moveSelect.value || null;
+  await api("PATCH", `/api/conversations/${c.id}`, { folder_id: folderId });
+  c.folder_id = folderId;
+  await Promise.all([refreshFolders(), refreshList()]);
+  applySelection();
+  renderHead();
+});
+crumb.addEventListener("click", () => startNew(activeFolderId()));
+
+// ---- メモ（全体と、今のフォルダ） ----
+
+const MEMO_LENGTH = 2000; // サーバーの上限（web.MEMO_LENGTH）と同じ
+const memoDialog = document.getElementById("memo-dialog");
+const globalMemo = document.getElementById("global-memo");
+const folderMemo = document.getElementById("folder-memo");
+
+function countMemo(field, counter) {
+  const n = field.value.trim().length;
+  counter.textContent = `${n} / ${MEMO_LENGTH}文字`;
+  counter.classList.toggle("over", n > MEMO_LENGTH);
+}
+
+async function openMemo() {
+  const [settings] = await Promise.all([api("GET", "/api/settings"), refreshFolders()]);
+  const folder = activeFolder();
+  globalMemo.value = settings.memo;
+  document.getElementById("folder-memo-field").hidden = !folder;
+  if (folder) {
+    document.getElementById("folder-memo-name").textContent = `「${folder.name}」`;
+    folderMemo.value = folder.memo;
+  }
+  document.getElementById("memo-status").textContent = "";
+  countMemo(globalMemo, document.getElementById("global-memo-count"));
+  countMemo(folderMemo, document.getElementById("folder-memo-count"));
+  memoDialog.showModal();
+}
+
+document.getElementById("open-memo").addEventListener("click", openMemo);
+document.getElementById("close-memo").addEventListener("click", () => memoDialog.close());
+globalMemo.addEventListener("input", () => countMemo(globalMemo, document.getElementById("global-memo-count")));
+folderMemo.addEventListener("input", () => countMemo(folderMemo, document.getElementById("folder-memo-count")));
+document.getElementById("memo-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const folder = activeFolder();
+  try {
+    await api("PATCH", "/api/settings", { memo: globalMemo.value });
+    if (folder) await api("PATCH", `/api/folders/${folder.id}`, { memo: folderMemo.value });
+  } catch (err) {
+    document.getElementById("memo-status").textContent = err.message;
+    return;
+  }
+  await refreshFolders();
+  memoDialog.close();
+});
+
+// ---- 開いている会話の見出し（フォルダ・名前・アーカイブ） ----
 
 // 新しい会話を送った直後は、まだ一覧にないので draft（仮の名前）を出す
 function renderHead(draft) {
@@ -484,64 +661,16 @@ function renderHead(draft) {
   titleEl.title = c ? "クリックして名前を変える" : "";
   archiveButton.hidden = !c;
   archiveButton.textContent = c?.archived ? "アーカイブから戻す" : "アーカイブ";
-  tagsEl.replaceChildren();
-  if (!c) return;
-  for (const tag of c.tags) {
-    const chip = el("span", "tag", tag);
-    const remove = el("button", "tag-remove", "×");
-    remove.type = "button";
-    remove.title = `タグ「${tag}」を外す`;
-    remove.addEventListener("click", () => saveTags(c.tags.filter((t) => t !== tag)));
-    chip.title = `「${tag}」の調査を探す`;
-    chip.addEventListener("click", (e) => {
-      if (e.target === remove) return;
-      search.value = `tag:${tag}`;
-      refreshList();
-    });
-    chip.append(remove);
-    tagsEl.append(chip);
+  const folder = activeFolder();
+  crumb.hidden = !folder;
+  crumb.textContent = folder ? `${folder.name} ›` : "";
+  crumb.title = folder ? `フォルダ「${folder.name}」で新しい調査を始める` : "";
+  document.getElementById("move").hidden = !c;
+  if (c) {
+    const none = Object.assign(el("option", "", "なし"), { value: "" });
+    moveSelect.replaceChildren(none, ...folders.map((f) => Object.assign(el("option", "", f.name), { value: f.id })));
+    moveSelect.value = c.folder_id ?? "";
   }
-  const add = el("button", "tag-add", "＋ タグ");
-  add.type = "button";
-  add.addEventListener("click", () => addTagInput(add, c));
-  tagsEl.append(add);
-}
-
-function addTagInput(button, c) {
-  const field = el("input", "tag-input");
-  field.placeholder = "タグ名";
-  field.maxLength = 20;
-  field.setAttribute("list", "tag-suggestions");
-  // 使ったことのあるタグを候補に出す
-  api("GET", "/api/tags").then((tags) => {
-    const datalist = document.getElementById("tag-suggestions") ?? document.body.appendChild(el("datalist"));
-    datalist.id = "tag-suggestions";
-    datalist.replaceChildren(...tags.filter((t) => !c.tags.includes(t)).map((t) => Object.assign(el("option"), { value: t })));
-  });
-  const done = async (save) => {
-    const tag = field.value.trim();
-    if (save && tag) await saveTags([...c.tags, tag]);
-    else renderHead();
-  };
-  field.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.isComposing) done(true);
-    if (e.key === "Escape") done(false);
-  });
-  field.addEventListener("blur", () => done(Boolean(field.value.trim())));
-  button.replaceWith(field);
-  field.focus();
-}
-
-async function saveTags(tags) {
-  const c = currentConversation();
-  try {
-    await api("PATCH", `/api/conversations/${c.id}`, { tags });
-    c.tags = [...new Set(tags.map((t) => t.trim()).filter(Boolean))];
-  } catch (err) {
-    alert(err.message);
-  }
-  renderHead();
-  renderList();
 }
 
 function renameConversation() {
@@ -675,7 +804,7 @@ function clarifyView({ agent, content }, index) {
 
 function answerView(turn, index) {
   if (turn.kind === "clarify") return clarifyView(turn, index);
-  const { agent, content, model, reports, links, seconds, llm_calls, trace_id } = turn;
+  const { agent, content, model, reports, links, seconds, llm_calls, trace_id, memo_added } = turn;
   const { node, body, meta } = answerFrame(agent);
   const searches = reports.reduce((n, r) => n + r.steps.length, 0);
   const members = new Set(reports.map((r) => r.source)).size;
@@ -709,8 +838,29 @@ function answerView(turn, index) {
   body.append(answer);
   // 照合の結果がない（照合を入れる前の）回答には出典を出さない
   if (links) body.append(citations(answer, links));
+  if (memo_added?.length) body.append(memoAddedView(memo_added));
   body.append(actions, record);
   return node;
+}
+
+// 調査のあとに所長がメモに書き足した内容。直したいときにすぐ開けるようにする
+function memoAddedView(added) {
+  const box = el("div", "memo-added");
+  const head = el("div", "memo-added-head", "メモに書き足しました");
+  const open = el("button", "quiet", "メモを開く");
+  open.type = "button";
+  open.addEventListener("click", openMemo);
+  head.append(open);
+  const list = el("ul");
+  for (const a of added) {
+    const where = a.folder ? `「${a.folder}」` : "全体";
+    const item = el("li", a.saved ? "" : "not-saved");
+    item.append(el("span", "memo-where", where), a.note);
+    if (!a.saved) item.append(el("span", "memo-full", "メモがいっぱいで書き足せませんでした"));
+    list.append(item);
+  }
+  box.append(head, list);
+  return box;
 }
 
 // 回答の中のリンクに出典の番号を振り、出典の一覧を返す。検索結果になかったリンクには印を付ける
@@ -812,6 +962,8 @@ function progressView() {
       // 再調査を頼む前に書きかけた文章は捨てる
       answerText = "";
       answer.replaceChildren();
+    } else if (event.type === "memo_start") {
+      meta.textContent = "メモに書き足すことを考えています…";
     } else if (event.type === "delta") {
       answerText += event.text;
       drawAnswer();
@@ -1028,12 +1180,12 @@ function showEmpty() {
     });
     examples.append(example);
   }
-  node.append(
-    logo,
-    el("h2", "", "あの話、どうなったっけ？"),
-    el("p", "", "所員が選んだ場所を手分けして調べ、所長が経緯を根拠のリンクつきでまとめます。"),
-    examples,
-  );
+  const folder = activeFolder();
+  const heading = folder ? `フォルダ「${folder.name}」で調べる` : "あの話、どうなったっけ？";
+  const note = folder
+    ? "このフォルダの調査は、フォルダで選んだ調べる場所を引き継ぎます。"
+    : "所員が選んだ場所を手分けして調べ、所長が経緯を根拠のリンクつきでまとめます。";
+  node.append(logo, el("h2", "", heading), el("p", "", note), examples);
   log.replaceChildren(node);
 }
 
@@ -1041,3 +1193,10 @@ function autosize() {
   input.style.height = "auto";
   input.style.height = `${input.scrollHeight}px`;
 }
+
+// ---- 起動 ----
+// すべての宣言がすんでから動かすため、ファイルの最後に置く
+// ソースの一覧と、フォルダの外での選択がそろってから入力欄を描く
+Promise.all([loadConfig(), refreshFolders()]).then(() => applySelection());
+refreshList();
+showEmpty();

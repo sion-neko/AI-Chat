@@ -4,6 +4,7 @@
 - 直前がユーザー発話でツールが渡されていれば、query だけで呼べるツールを全部、質問文そのままを query にして呼ぶ
 - 所長に再調査のツールが渡され、質問に「再調査」が含まれていれば、全所員に再調査を頼む
 - 所長の受付（ask_user が渡される）では、質問に「あの件」が含まれていれば聞き返し、そうでなければ調べる
+- 所長のメモ（remember が渡される）では、質問に「覚えて」が含まれていればメモに書き足し、そうでなければ何もしない
 - 直前がツール結果なら、その結果を要約したことにして最終回答を返す
 - ツールなしで呼ばれたら、受け取った内容をそのまま返す
 - stream: true なら、同じ内容を少しずつSSEで返す（画面で逐次表示を確かめられるよう、間を置く）
@@ -41,6 +42,13 @@ def respond(req: dict) -> dict:
             calls = [_call("ask_user", {"question": "[mock] どの件のことですか？（例: 監視サーバーのディスク増設、VPN証明書の更新）"})]
             return _completion(model, {"role": "assistant", "content": None, "tool_calls": calls}, "tool_calls")
         return _completion(model, {"role": "assistant", "content": "調査します"}, "stop")
+
+    if "remember" in all_tools:
+        if "覚えて" in last["content"]:
+            scope = all_tools["remember"]["parameters"]["properties"]["scope"]["enum"][0]
+            calls = [_call("remember", {"scope": scope, "note": "[mock] 「監視サーバー」は mon01 のこと"})]
+            return _completion(model, {"role": "assistant", "content": None, "tool_calls": calls}, "tool_calls")
+        return _completion(model, {"role": "assistant", "content": "なし"}, "stop")
 
     if last["role"] == "user" and "request_reinvestigation" in all_tools and "再調査" in last["content"]:
         sources = all_tools["request_reinvestigation"]["parameters"]["properties"]["source"]["enum"]

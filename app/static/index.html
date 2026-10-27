@@ -16,7 +16,14 @@
       </div>
     </div>
     <button id="new-chat" class="new-chat" type="button">新しい調査</button>
-    <input id="search" class="search" type="search" placeholder="過去の調査を探す" title="タイトルと中身（質問・回答・調査の記録）から探します。空白で区切るとAND、tag:名前 でタグ">
+    <input id="search" class="search" type="search" placeholder="過去の調査を探す" title="タイトルと中身（質問・回答・調査の記録）から探します。空白で区切るとAND">
+    <section class="folders">
+      <div class="section-head">
+        <span>フォルダ</span>
+        <button id="new-folder" class="quiet" type="button" title="フォルダを作る">＋ 作る</button>
+      </div>
+      <div id="folder-list" class="folder-list"></div>
+    </section>
     <nav id="conversations" class="conversations"></nav>
     <button id="toggle-archive" class="quiet archive-toggle" type="button">アーカイブを見る</button>
   </aside>
@@ -24,11 +31,16 @@
   <div class="main">
     <header class="topbar">
       <div class="conversation-head">
+        <button id="folder-crumb" class="crumb" type="button" hidden></button>
         <h1 id="conversation-title" class="conversation-title">新しい調査</h1>
-        <div id="conversation-tags" class="tags"></div>
       </div>
+      <label id="move" class="move" hidden>
+        <span>フォルダ</span>
+        <select id="move-folder"></select>
+      </label>
       <button id="archive" class="quiet" type="button" hidden>アーカイブ</button>
       <span id="model" class="model" title="設定中のモデル">…</span>
+      <button id="open-memo" class="quiet" type="button">メモ</button>
       <button id="open-status" class="quiet" type="button">接続確認</button>
       <button id="open-characters" class="quiet" type="button">キャラクター</button>
     </header>
@@ -44,6 +56,43 @@
       </div>
     </form>
   </div>
+
+  <dialog id="memo-dialog" class="wide">
+    <div class="dialog-head">
+      <h2>メモ</h2>
+      <button id="close-memo" class="close" type="button" title="閉じる">×</button>
+    </div>
+    <p class="dialog-note">所長と所員が調べるときに読みます。社内での呼び方、どの話がどこにあるか、回答の好みなどを書いてください。調査のあとに所長が自分で書き足すこともあります。</p>
+    <form id="memo-form" class="memo-form">
+      <label class="field memo-field">
+        <span>全体のメモ <small>すべての調査で読みます</small><small id="global-memo-count" class="memo-count"></small></span>
+        <textarea id="global-memo" rows="7" placeholder="例）回答は結論を先に書いてほしい&#10;例）「監視サーバー」は mon01 のこと"></textarea>
+      </label>
+      <label id="folder-memo-field" class="field memo-field" hidden>
+        <span><b id="folder-memo-name"></b> のメモ <small>このフォルダの調査だけで読みます</small><small id="folder-memo-count" class="memo-count"></small></span>
+        <textarea id="folder-memo" rows="7" placeholder="例）この案件の話は Zulip の #x-ops と GitLab の x/infra にある&#10;例）「VPN」はこの案件の拠点間VPNのこと"></textarea>
+      </label>
+      <div class="dialog-actions">
+        <span id="memo-status" class="character-status"></span>
+        <button class="primary" type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="folder-dialog">
+    <div class="dialog-head">
+      <h2>フォルダの設定</h2>
+      <button id="close-folder" class="close" type="button" title="閉じる">×</button>
+    </div>
+    <form id="folder-form" class="folder-form">
+      <label class="field"><span>名前</span><input id="folder-name" maxlength="40" required></label>
+      <div class="dialog-actions">
+        <span id="folder-status" class="character-status"></span>
+        <button id="delete-folder" class="quiet danger" type="button">フォルダを削除</button>
+        <button class="primary" type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="characters">
     <div class="dialog-head">
