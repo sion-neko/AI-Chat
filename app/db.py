@@ -8,6 +8,7 @@
              links: [{"url", "found"}] 回答のリンクが検索結果にあったか（app/links.py）
              seconds, llm_calls: かかった時間とLLMの呼び出し回数
              kind: "clarify" なら、調べる前に所長が聞き返したターン（content が質問。reports・links は持たない）
+                   "chat" なら、調べる場所を選ばずに所長がそのまま答えたターン（reports・links は持たない）
              memo_added: [{"scope", "note", "folder", "saved"}] 調査のあとに所長がメモに書き足した内容
              trace_id: LLMとのやりとりの記録（traces テーブル。プロンプトを丸ごと含み大きいので分けて持つ）
 """
@@ -36,7 +37,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     archived   INTEGER NOT NULL DEFAULT 0,
-    folder_id  TEXT REFERENCES folders(id) ON DELETE SET NULL
+    folder_id  TEXT REFERENCES folders(id) ON DELETE SET NULL,
+    unread     INTEGER NOT NULL DEFAULT 0  -- 回答が届いたが、まだ画面で読んでいない
 );
 -- 質問に添えられた画像。会話のターンには id だけを持たせる
 CREATE TABLE IF NOT EXISTS images (
@@ -93,6 +95,7 @@ ADDED_COLUMNS = {
     "conversations": {
         "archived": "INTEGER NOT NULL DEFAULT 0",
         "folder_id": "TEXT REFERENCES folders(id) ON DELETE SET NULL",
+        "unread": "INTEGER NOT NULL DEFAULT 0",
     },
 }
 
@@ -105,6 +108,10 @@ def init():
             for name, definition in columns.items():
                 if name not in existing:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
+def _conversation(row) -> dict:
+    return {**dict(row), "archived": bool(row["archived"]), "unread": bool(row["unread"])}
 
 
 def list_conversations(query: str = "", archived: bool = False, folder_id: str | None = None) -> list[dict]:
@@ -122,15 +129,15 @@ def list_conversations(query: str = "", archived: bool = False, folder_id: str |
             "(title LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM turns WHERE turns.conversation_id = conversations.id AND data LIKE ? ESCAPE '\\'))"
         )
         params += [pattern, pattern]
-    sql = f"SELECT id, title, updated_at, archived, folder_id FROM conversations WHERE {' AND '.join(where)} ORDER BY updated_at DESC"
+    sql = f"SELECT id, title, updated_at, archived, folder_id, unread FROM conversations WHERE {' AND '.join(where)} ORDER BY updated_at DESC"
     with connect() as conn:
-        return [{**dict(r), "archived": bool(r["archived"])} for r in conn.execute(sql, params)]
+        return [_conversation(r) for r in conn.execute(sql, params)]
 
 
 def get_conversation(conv_id: str) -> dict | None:
     with connect() as conn:
-        row = conn.execute("SELECT id, title, updated_at, archived, folder_id FROM conversations WHERE id = ?", (conv_id,)).fetchone()
-        return {**dict(row), "archived": bool(row["archived"])} if row else None
+        row = conn.execute("SELECT id, title, updated_at, archived, folder_id, unread FROM conversations WHERE id = ?", (conv_id,)).fetchone()
+        return _conversation(row) if row else None
 
 
 def create_conversation(title: str, folder_id: str | None = None) -> str:
@@ -145,13 +152,14 @@ def create_conversation(title: str, folder_id: str | None = None) -> str:
 
 
 def update_conversation(conv_id: str, **changes) -> bool:
-    """渡された項目（title, archived, folder_id）だけ書き換える。folder_id=None はフォルダから出す。
+    """渡された項目（title, archived, folder_id, unread）だけ書き換える。folder_id=None はフォルダから出す。
 
     会話がなければ False。更新日は変えない（並び順が動かないように）。
     """
-    assert set(changes) <= {"title", "archived", "folder_id"}
-    if "archived" in changes:
-        changes["archived"] = int(changes["archived"])
+    assert set(changes) <= {"title", "archived", "folder_id", "unread"}
+    for key in ("archived", "unread"):
+        if key in changes:
+            changes[key] = int(changes[key])
     with connect() as conn:
         if not conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conv_id,)).fetchone():
             return False
@@ -163,6 +171,12 @@ def update_conversation(conv_id: str, **changes) -> bool:
 def delete_conversation(conv_id: str):
     with connect() as conn:
         conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
+
+
+def delete_empty_conversations():
+    """ターンが1つもない会話を消す。最初の調査の途中でアプリが止まると残る（起動したときに呼ぶ）。"""
+    with connect() as conn:
+        conn.execute("DELETE FROM conversations WHERE NOT EXISTS (SELECT 1 FROM turns WHERE turns.conversation_id = conversations.id)")
 
 
 # ---- フォルダ ----

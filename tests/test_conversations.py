@@ -33,6 +33,10 @@ class ConversationsTest(unittest.TestCase):
         self.assertEqual(self.titles("100%_done"), ["ディスク増設どうなった？"])
         self.assertEqual(self.titles("%"), ["ディスク増設どうなった？"])
 
+    def test_delete_empty_conversations(self):
+        db.delete_empty_conversations()
+        self.assertEqual(self.titles(), ["ディスク増設どうなった？"])
+
     def test_rename_and_archive(self):
         db.update_conversation(self.vpn, archived=True, title="VPN証明書")
         self.assertEqual(self.titles(), ["ディスク増設どうなった？"])
@@ -45,7 +49,7 @@ class ConversationsTest(unittest.TestCase):
                                "CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
                                "INSERT INTO conversations VALUES ('a', '古い会話', 'x', 'x');")
         db.init()
-        self.assertEqual(db.list_conversations(), [{"id": "a", "title": "古い会話", "updated_at": "x", "archived": False, "folder_id": None}])
+        self.assertEqual(db.list_conversations(), [{"id": "a", "title": "古い会話", "updated_at": "x", "archived": False, "folder_id": None, "unread": False}])
 
     def test_replace_turns(self):
         db.append_turns(self.disk, [{"role": "user", "content": "その後は？"}, {"role": "assistant", "content": "古い回答", "trace_id": db.save_trace(self.disk, [{"who": "x"}])}])

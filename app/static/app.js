@@ -62,6 +62,7 @@ titleEl.addEventListener("click", renameConversation);
 sourceBox.addEventListener("change", () => {
   selection.unchecked = [...sourceBox.querySelectorAll("input:not(:checked)")].map((box) => box.value);
   saveSelection();
+  setSendButton();
 });
 
 document.getElementById("open-characters").addEventListener("click", async () => {
@@ -99,16 +100,42 @@ input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     // 調査中のEnterで中止にならないよう、送れるときだけ送る
-    if (!running) form.requestSubmit();
+    if (!busy()) form.requestSubmit();
+    else if (input.value.trim()) explainBusy();
   }
 });
 
-// 調査中のターン。調査中は送信ボタンが中止ボタンになる
-let running = null; // { turnId, cancelling }
+// 調査中のターン。turn_id → { turnId, conversationId, info, events, view, turnNode, cancelling, mine }
+// info はサーバーの "job" イベントの中身（質問・質問の位置・やり直しか・続報か）
+// view と turnNode は、その会話を開いている間だけの進み具合の表示。mine はこの画面から送った質問と画像
+// 調査はサーバーで最後まで走るので、別の会話を開いても、画面をリロードしても続く
+const jobs = new Map();
+// 質問を送っている途中（サーバーが受け付けるまで）。二重に送らないようにする
+let submitting = false;
+
+// 開いている会話で調査中か、質問を送っている途中。やり直しや続報はできない
+function busy() {
+  return Boolean(currentJob()) || submitting;
+}
+
+// 調査中に送ろうとしたときに、なぜ送れないかを出す（入力した文章はそのまま残る）
+function explainBusy() {
+  showComposerStatus("まだ調べています。終わるか中止してから送れます");
+}
+
+function jobFor(conversationId) {
+  return conversationId ? [...jobs.values()].find((j) => j.conversationId === conversationId) : undefined;
+}
+
+// 開いている会話で調査中のもの。あれば送信ボタンが中止ボタンになる
+function currentJob() {
+  return jobFor(currentId);
+}
 
 form.addEventListener("submit", (e) => {
   e.preventDefault();
-  if (running) return cancelTurn();
+  if (currentJob()) return cancelTurn();
+  if (submitting) return;
   const images = attachments;
   // 画像だけを添えて送ったときは、画像について調べてもらう
   const content = input.value.trim() || (images.length ? "この画像について、関係する話を調べて" : "");
@@ -125,77 +152,337 @@ form.addEventListener("submit", (e) => {
 // images は新しく添える画像（data URL）。shownImages は質問に並べて見せる画像（やり直しでは元の質問の画像）
 // followup なら続報の調査（直前の回答を調べた日より後の動きだけを調べる）
 async function ask(content, fromTurn, skipClarify = false, images = [], shownImages = images, followup = false) {
+  askNotificationPermission();
   if (document.getElementById("empty")) {
     log.replaceChildren();
     renderHead({ title: content });
   }
-  if (fromTurn !== null) {
-    // やり直す質問と、それより後のやりとりを画面から外す（失敗したら開き直して元に戻す）
-    for (const node of [...log.querySelectorAll(".turn")].filter((n) => Number(n.dataset.index) >= fromTurn)) node.remove();
-  }
+  if (fromTurn !== null) hideTurnsFrom(fromTurn);
   const index = fromTurn ?? turnCount;
-  const turn = append(turnView(content, index, { images: shownImages, followup }));
-
-  const progress = progressView();
-  turn.append(progress.node);
-  running = { turnId: null, cancelling: false };
+  // サーバーが受け付けるまでの仮の表示。受け付けたら調査の表示としてそのまま使う
+  const turnNode = append(turnView(content, index, { images: shownImages, followup }));
+  const consult = !selectedSources().length;
+  const view = progressView(undefined, consult);
+  turnNode.append(view.node);
+  submitting = true;
   setSendButton();
+  const asked = currentId;
+  let job = null;
   try {
-    const path = currentId ? `/api/conversations/${currentId}/messages` : "/api/conversations";
+    const path = asked ? `/api/conversations/${asked}/messages` : "/api/conversations";
     const body = { content, sources: selectedSources(), scopes: selection.scopes };
-    if (!currentId && viewFolderId) body.folder_id = viewFolderId;
+    if (!asked && viewFolderId) body.folder_id = viewFolderId;
     if (fromTurn !== null) body.from_turn = fromTurn;
     if (skipClarify) body.skip_clarify = true;
     if (images.length) body.images = images;
     if (followup) body.followup = true;
-    let result = null;
-    await streamTurn(path, body, (event) => {
-      if (event.type === "error") throw new Error(event.message);
-      if (event.type === "start") running.turnId = event.turn_id;
-      else if (event.type === "done" || event.type === "cancelled") result = event;
-      else progress.update(event);
-    });
-    if (!result) throw new Error("応答が途中で切れました");
-    if (result.type === "cancelled") {
-      // 何も保存されていないので、質問ごと消して入力欄に戻す
-      turn.remove();
-      restoreQuestion(content, images);
-      if (fromTurn !== null) await openConversation(currentId);
-      else if (!log.children.length) showEmpty();
+    const { turn_id, conversation_id } = await api("POST", path, body);
+    if (finished.has(turn_id)) {
+      // 受け付けの返事より先に、調査が終わったと届いた（とても速いLLM）。保存された結果を開く
+      if (currentId === asked) await openConversation(conversation_id);
+      else await refreshList();
       return;
     }
-    progress.node.replaceWith(answerView(result.turn, index));
-    if (result.question.image_text) turn.querySelector(".question-block").append(imageTextView(result.question.image_text));
-    if (result.question.since) turn.querySelector(".followup-since").textContent = followupLabel(result.question.since);
-    showFollowupOnLast();
-    turnCount = index + 2;
-    setPlaceholder(result.turn);
-    if (!currentId) {
-      currentId = result.conversation_id;
-      await Promise.all([refreshList(), refreshFolders()]);
-      renderHead();
+    job = ensureJob(turn_id, conversation_id, { question: content, index, replace: fromTurn !== null, followup, consult });
+    job.mine = { content, images, shownImages };
+    // 受け付けを待つ間に別の会話へ移っていたら、仮の表示は捨てる（戻ってきたときに描き直す）
+    if (currentId === asked && turnNode.isConnected) {
+      if (!asked) {
+        currentId = conversation_id;
+        renderHead({ title: content });
+      }
+      job.turnNode = turnNode;
+      job.view = view;
+      for (const event of job.events) view.update(event);
     }
+    if (!asked) await Promise.all([refreshList(), refreshFolders()]);
+    renderHead();
   } catch (err) {
-    progress.node.replaceWith(el("p", "error-text", `調査できませんでした: ${err.message}`));
-    restoreQuestion(content, images);
+    if (currentId === asked) restoreQuestion(content, images);
+    if (fromTurn !== null && currentId === asked) {
+      // やり直しで外したやりとりを元に戻す
+      await openConversation(asked);
+      showComposerStatus(`調査を始められませんでした: ${err.message}`);
+    } else view.node.replaceWith(el("p", "error-text turn-error", `調査を始められませんでした: ${err.message}`));
   } finally {
-    running = null;
+    submitting = false;
+    // 受け付けを待つ間に別の会話へ移って戻ってきていたら、ここで描く
+    if (job) showJob(job);
     setSendButton();
     input.focus();
   }
 }
 
-async function cancelTurn() {
-  if (!running.turnId || running.cancelling) return;
-  running.cancelling = true;
+// やり直す質問と、それより後のやりとりを画面から外す（失敗・中止したら開き直して元に戻す）
+function hideTurnsFrom(index) {
+  for (const node of [...log.querySelectorAll(".turn")].filter((n) => Number(n.dataset.index) >= index)) node.remove();
+}
+
+// 調査中の一覧に入れる。進み具合のストリームと質問の応答のどちらが先に届いても、同じものを指す
+function ensureJob(turnId, conversationId, info) {
+  let job = jobs.get(turnId);
+  if (!job) {
+    job = { turnId, conversationId, info, events: [], view: null, turnNode: null, cancelling: false, mine: null, seen: true };
+    jobs.set(turnId, job);
+  }
+  return job;
+}
+
+// 開いている会話の調査中のターンを、溜まった進み具合から描く
+function showJob(job) {
+  if (job.conversationId !== currentId || job.turnNode?.isConnected) return;
+  // この画面から送った質問は、受け付けを待つ間の仮の表示をそのまま使う（ask が付ける）
+  if (submitting) return;
+  const { question, index, replace, followup, image_count } = job.info;
+  if (replace) hideTurnsFrom(index);
+  log.querySelector(".turn-error")?.remove();
+  job.turnNode = append(turnView(question, index, { images: job.mine?.shownImages ?? [], followup, imageCount: job.mine ? 0 : image_count }));
+  job.view = progressView(job.info.started_at, job.info.consult);
+  job.turnNode.append(job.view.node);
+  for (const event of job.events) job.view.update(event);
   setSendButton();
-  await api("POST", `/api/turns/${running.turnId}/cancel`);
+}
+
+async function cancelTurn() {
+  const job = currentJob();
+  if (!job || job.cancelling) return;
+  job.cancelling = true;
+  setSendButton();
+  await api("POST", `/api/turns/${job.turnId}/cancel`);
 }
 
 function setSendButton() {
-  send.textContent = !running ? "調査を依頼" : running.cancelling ? "中止しています…" : "中止";
-  send.classList.toggle("stop", Boolean(running));
-  send.disabled = Boolean(running?.cancelling);
+  const job = currentJob();
+  const consult = !selectedSources().length;
+  document.getElementById("consult-hint").hidden = !consult;
+  const idle = consult ? "所長に聞く" : "調査を依頼";
+  send.textContent = job ? (job.cancelling ? "中止しています…" : "中止") : submitting ? "受け付けています…" : idle;
+  send.classList.toggle("stop", Boolean(job));
+  send.disabled = Boolean(job?.cancelling) || (submitting && !job);
+}
+
+// ---- 進み具合のストリーム ----
+
+async function connectEvents() {
+  for (let wait = 1000; ; wait = Math.min(wait * 2, 15000)) {
+    try {
+      // つなぎ直すと調査中のものが始めから流れてくるので、溜めた分は捨てて、流れてきたものだけを残す
+      for (const job of jobs.values()) job.seen = false;
+      await readLines("/api/events", (event) => {
+        if (event.type === "ready") {
+          wait = 1000;
+          return lostJobs();
+        }
+        if (event.type === "title") return onTitle(event);
+        if (event.turn_id) onJobEvent(event);
+      });
+    } catch {
+      // つながらなかった・切れた。少し待ってつなぎ直す
+    }
+    await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+}
+
+// 所長が調査に題名を付けた
+function onTitle({ conversation_id, title }) {
+  for (const c of [...conversations, openedConversation]) if (c?.id === conversation_id) c.title = title;
+  renderList();
+  if (conversation_id === currentId && !titleEl.querySelector("input")) renderHead();
+}
+
+function onJobEvent(event) {
+  if (event.type === "job") {
+    const job = ensureJob(event.turn_id, event.conversation_id, event);
+    job.info = event;
+    job.events = [];
+    job.seen = true;
+    // つなぎ直したときは、描いてあった進み具合を描き直す
+    if (job.view) {
+      job.view.reset();
+    }
+    showJob(job);
+    renderList();
+    updateTitle();
+    // 別の画面（タブ）で始めた調査なら、一覧に出す
+    if (!conversations.some((c) => c.id === event.conversation_id)) refreshListSoon();
+    return;
+  }
+  const job = jobs.get(event.turn_id);
+  if (!job) {
+    // 受け付けの返事より先に終わりが届いた
+    if (["done", "cancelled", "error"].includes(event.type)) finished.add(event.turn_id);
+    return;
+  }
+  if (event.type === "done" || event.type === "cancelled" || event.type === "error") return finishJob(job, event);
+  job.events.push(event);
+  job.view?.update(event);
+}
+
+// つながっていない間に終わった調査。結果はDBにあるので、一覧と開いている会話を読み直す
+function lostJobs() {
+  const lost = [...jobs.values()].filter((j) => !j.seen);
+  if (!lost.length) return;
+  for (const job of lost) jobs.delete(job.turnId);
+  refreshList();
+  refreshFolders();
+  updateTitle();
+  setSendButton();
+  // 終わっていれば開き直すと回答が出る。最初の調査の途中でサーバーが止まった会話は、もうない
+  const current = lost.find((j) => j.conversationId === currentId);
+  if (current) {
+    // 回答が保存されていなければ（中断された）、質問を入力欄に戻して聞き直せるようにする
+    const restore = () => current.mine && restoreQuestion(current.mine.content, current.mine.images);
+    openConversation(currentId)
+      .then(() => !current.info.replace && turnCount <= current.info.index && restore())
+      .catch(() => {
+        startNew(viewFolderId);
+        restore();
+      });
+  }
+  toast("つなぎ直しました", "アプリが止まっていた間の調査は、終わっていなければ中断されています。", null);
+}
+
+// 終わった調査の turn_id（受け付けの返事より先に終わりが届いたときのため）
+const finished = new Set();
+
+function finishJob(job, event) {
+  jobs.delete(job.turnId);
+  finished.add(job.turnId);
+  // 読んだ印を付け終えてから一覧を読み直す（先に読むと、届いたばかりの未読の印が残る）
+  let read = null;
+  const shown = job.conversationId === currentId && job.turnNode?.isConnected;
+  const title = job.info.title || conversations.find((c) => c.id === job.conversationId)?.title || job.info.question;
+  if (event.type === "done") {
+    if (shown) {
+      const { index } = job.info;
+      job.view.node.replaceWith(answerView(event.turn, index));
+      const block = job.turnNode.querySelector(".question-block");
+      if (event.question.image_text) block.append(imageTextView(event.question.image_text));
+      if (event.question.since) job.turnNode.querySelector(".followup-since").textContent = followupLabel(event.question.since);
+      // 画像はサーバーに保存された分に差し替える（リロードしなくても開ける）
+      job.turnNode.images = (event.question.images ?? []).map((id) => `/api/images/${id}`);
+      showFollowupOnLast();
+      turnCount = index + 2;
+      setPlaceholder(event.turn);
+    }
+    if (shown && !document.hidden) read = markRead(job.conversationId);
+    else arrived(job.conversationId, title, event.turn);
+  } else if (event.type === "cancelled") {
+    if (shown) {
+      job.turnNode.remove();
+      if (job.mine) restoreQuestion(job.mine.content, job.mine.images);
+    }
+    if (job.conversationId === currentId) {
+      if (event.deleted) {
+        currentId = null;
+        showEmpty();
+      } else if (job.info.replace) openConversation(currentId);
+    }
+  } else {
+    if (shown) {
+      job.view.node.replaceWith(el("p", "error-text turn-error", `調査できませんでした: ${event.message}`));
+      if (job.mine) restoreQuestion(job.mine.content, job.mine.images);
+    }
+    if (job.conversationId === currentId && event.deleted) {
+      // 会話はなくなったので、次に送る質問は新しい調査として送る（エラーの表示は残す）
+      currentId = null;
+      openedConversation = null;
+      turnCount = 0;
+      renderHead({ title: job.info.question });
+    }
+    if (!shown || document.hidden) notify(`調査できませんでした: ${title}`, event.message, event.deleted ? null : job.conversationId);
+  }
+  setSendButton();
+  updateTitle();
+  Promise.resolve(read).then(() => Promise.all([refreshList(), refreshFolders()]));
+}
+
+// ---- 回答が届いたときの知らせ ----
+
+// この画面を開いてから届いて、まだ見ていない回答の会話
+const arrivals = new Set();
+
+function arrived(conversationId, title, turn) {
+  arrivals.add(conversationId);
+  const heading = turn.kind === "clarify" ? `${turn.agent}所長から確認があります` : `${turn.agent}所長から回答が届きました`;
+  notify(heading, title, conversationId);
+}
+
+// 画面の外（デスクトップ通知）と中（右下の知らせ）で知らせる。conversationId があれば、押すとその会話を開く
+function notify(heading, body, conversationId) {
+  if (document.hidden && "Notification" in window && Notification.permission === "granted") {
+    const n = new Notification(heading, { body, icon: "/static/ghost.svg", tag: conversationId ?? undefined });
+    n.addEventListener("click", () => {
+      window.focus();
+      if (conversationId) openConversation(conversationId);
+      n.close();
+    });
+  }
+  toast(heading, body, conversationId);
+}
+
+const toasts = document.getElementById("toasts");
+
+function toast(heading, body, conversationId) {
+  const node = el("div", "toast");
+  const text = el("div", "toast-text");
+  text.append(el("b", "", heading), el("span", "", body));
+  node.append(text);
+  if (conversationId) {
+    const open = el("button", "primary", "開く");
+    open.type = "button";
+    open.addEventListener("click", () => {
+      node.remove();
+      openConversation(conversationId);
+    });
+    node.append(open);
+  }
+  const close = el("button", "close", "×");
+  close.type = "button";
+  close.title = "閉じる";
+  close.addEventListener("click", () => node.remove());
+  node.append(close);
+  // 同じ会話の知らせは新しいものだけにする
+  if (conversationId) {
+    node.dataset.conversation = conversationId;
+    toasts.querySelector(`[data-conversation="${conversationId}"]`)?.remove();
+  }
+  toasts.append(node);
+  setTimeout(() => node.remove(), 15000);
+}
+
+// 最初に質問するときに、デスクトップ通知を出してよいか聞く（押したときでないと聞けない）
+function askNotificationPermission() {
+  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+}
+
+async function markRead(conversationId) {
+  arrivals.delete(conversationId);
+  for (const t of toasts.querySelectorAll(`[data-conversation="${conversationId}"]`)) t.remove();
+  updateTitle();
+  const c = conversations.find((c) => c.id === conversationId);
+  if (c) c.unread = false;
+  renderList();
+  await api("PATCH", `/api/conversations/${conversationId}`, { unread: false });
+}
+
+// タブの題名に、調査中の数とまだ見ていない回答の数を出す（別のタブで作業していても気づけるように）
+function updateTitle() {
+  const parts = [];
+  if (arrivals.size) parts.push(`(${arrivals.size})`);
+  if (jobs.size) parts.push(`調査中${jobs.size}件`);
+  document.title = [...parts, "おばけ探偵事務所"].join(" ");
+}
+
+// 裏に回していたタブに戻ってきたら、開いている会話の回答は読んだことにする
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && currentId && (arrivals.has(currentId) || currentConversation()?.unread)) markRead(currentId);
+});
+
+let listTimer = null;
+function refreshListSoon() {
+  clearTimeout(listTimer);
+  listTimer = setTimeout(refreshList, 200);
 }
 
 // 聞き直せるよう、質問と添えた画像を入力欄に戻す（入力中の文章や画像があれば上書きしない）
@@ -226,6 +513,35 @@ let visionEnabled = false;
 function showComposerStatus(text) {
   composerStatus.textContent = text;
   setTimeout(() => composerStatus.textContent === text && (composerStatus.textContent = ""), 4000);
+}
+
+// 添えられたファイル。画像は画像として、それ以外はテキストとして入力欄に貼る
+function addFiles(files) {
+  addImages(files);
+  addTextFiles([...files].filter((f) => !f.type.startsWith("image/")));
+}
+
+// ログや設定ファイルは、中身をコードブロックにして入力欄の最後に貼る（そのままLLMに送られる）
+const TEXT_FILE_SIZE = 200_000;
+const TEXT_FILE_TYPES = "text/*,.log,.md,.csv,.tsv,.json,.yaml,.yml,.conf,.cfg,.ini,.xml,.sh,.py,.sql,.toml,.tf,.txt";
+
+async function addTextFiles(files) {
+  for (const file of files) {
+    if (file.size > TEXT_FILE_SIZE) {
+      showComposerStatus(`${file.name} は大きすぎます（${Math.round(TEXT_FILE_SIZE / 1000)}KBまで）。必要な部分だけを貼ってください`);
+      continue;
+    }
+    const text = await file.text();
+    if (text.includes("\0")) {
+      showComposerStatus(`${file.name} は文字のファイルではないので添えられません`);
+      continue;
+    }
+    // 中に ``` があっても閉じないよう、4つで囲む
+    const block = `\`\`\`\`${file.name}\n${text.replace(/\n+$/, "")}\n\`\`\`\``;
+    input.value = input.value.trim() ? `${input.value.replace(/\s+$/, "")}\n\n${block}` : `${block}\n\n`;
+    autosize();
+  }
+  input.focus();
 }
 
 async function addImages(files) {
@@ -281,7 +597,7 @@ function renderAttachments() {
 
 attachButton.addEventListener("click", () => attachFile.click());
 attachFile.addEventListener("change", () => {
-  addImages(attachFile.files);
+  addFiles(attachFile.files);
   attachFile.value = "";
 });
 input.addEventListener("paste", (e) => {
@@ -300,7 +616,7 @@ form.addEventListener("drop", (e) => {
   form.classList.remove("dragging");
   if (!e.dataTransfer.files.length) return;
   e.preventDefault();
-  addImages(e.dataTransfer.files);
+  addFiles(e.dataTransfer.files);
 });
 
 // ---- 設定とソース ----
@@ -310,14 +626,40 @@ let sourceList = [];
 
 async function loadConfig() {
   const c = await api("GET", "/api/config");
-  document.getElementById("model").textContent = c.model;
-  document.getElementById("model").title = c.vision ? "設定中のモデル（画像を読める）" : "設定中のモデル";
+  renderDestination(c);
   visionEnabled = c.vision;
-  attachButton.hidden = !c.vision;
+  attachFile.accept = (c.vision ? "image/png,image/jpeg,image/webp,image/gif," : "") + TEXT_FILE_TYPES;
   directorName = c.director;
   sourceList = c.sources;
   sourceLabels = new Map(c.sources.map((s) => [s.id, s.label]));
   renderSources(c.sources);
+}
+
+// LLMの送り先。秘密の情報を入れてよいか判断できるよう、手元のネットワークの中か外かを出す
+const DESTINATIONS = {
+  local: ["ローカル", "手元のネットワークの中"],
+  external: ["外部", "インターネット上"],
+  unknown: ["不明", "送り先のアドレスが分からない場所"],
+};
+let destinationNote = "";
+
+function renderDestination({ model, vision, llm_url, destination: d }) {
+  const [label, where] = DESTINATIONS[d.kind];
+  const badge = document.getElementById("model");
+  badge.replaceChildren(el("span", `destination ${d.kind}`, label), el("span", "model-name", model));
+  const addresses = d.addresses.length ? `（${d.addresses.join(", ")}）` : "";
+  badge.title =
+    `質問と検索結果は、${where}のLLMに送ります。\n送り先: ${llm_url}${addresses}\nモデル: ${model}${vision ? "（画像を読める）" : ""}` +
+    (d.kind === "local" ? "" : "\n秘密の情報を入れる前に、送ってよい相手か確かめてください。");
+  destinationNote =
+    d.kind === "local"
+      ? `質問と検索結果は、${where}のLLM（${d.host}）にだけ送ります。`
+      : `質問と検索結果を、${where}のLLM（${d.host}）に送ります。秘密の情報を入れる前に確かめてください。`;
+  const note = document.getElementById("destination-note");
+  if (note) {
+    note.textContent = destinationNote;
+    note.className = `destination-note ${d.kind}`;
+  }
 }
 
 // 今のフォルダ。開いている調査があればそのフォルダ、なければサイドバーで選んでいるフォルダ
@@ -366,6 +708,7 @@ function renderSources(sources) {
       return item;
     }),
   );
+  setSendButton();
 }
 
 // 範囲を選べるソースのチップの横に出すボタン。今の選択を短く出す
@@ -651,8 +994,13 @@ function startNew(folderId) {
   input.focus();
 }
 
+// 最後に開こうとした会話（読み込みの途中で別の会話を開いたら、前の結果は捨てる）
+let opening = null;
+
 async function openConversation(id) {
+  opening = id;
   const data = await api("GET", `/api/conversations/${id}`);
+  if (opening !== id) return;
   const folderBefore = activeFolderId();
   currentId = id;
   openedConversation = conversations.find((c) => c.id === id) ?? null;
@@ -668,10 +1016,45 @@ async function openConversation(id) {
   });
   turnCount = data.turns.length;
   log.replaceChildren(...nodes);
+  const job = jobFor(id);
+  if (job) showJob(job);
   showFollowupOnLast();
   log.scrollTop = log.scrollHeight;
+  // 検索して開いたときは、見つかった言葉に印を付けて最初の場所を見せる
+  markSearchWords();
   setPlaceholder(data.turns.at(-1));
   highlightCurrent();
+  setSendButton();
+  if (!document.hidden && (openedConversation?.unread || arrivals.has(id))) markRead(id);
+}
+
+function markSearchWords() {
+  const words = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return;
+  const walker = document.createTreeWalker(log, NodeFilter.SHOW_TEXT);
+  const hits = [];
+  for (let node; (node = walker.nextNode()); ) {
+    // たたんだ調査の記録の中までは印を付けない（開かないと見えないので）
+    if (node.parentElement.closest("details:not([open]), button, mark")) continue;
+    if (words.some((w) => node.data.toLowerCase().includes(w))) hits.push(node);
+  }
+  for (const node of hits) {
+    const text = node.data;
+    const lower = text.toLowerCase();
+    const parts = [];
+    let at = 0;
+    while (at < text.length) {
+      // いちばん手前に出てくる言葉から印を付ける
+      const next = words.map((w) => [lower.indexOf(w, at), w]).filter(([i]) => i >= 0).sort((a, b) => a[0] - b[0])[0];
+      if (!next) break;
+      const [i, w] = next;
+      parts.push(text.slice(at, i), el("mark", "search-hit", text.slice(i, i + w.length)));
+      at = i + w.length;
+    }
+    parts.push(text.slice(at));
+    node.replaceWith(...parts);
+  }
+  log.querySelector("mark.search-hit")?.scrollIntoView({ block: "center" });
 }
 
 async function deleteConversation(id) {
@@ -733,6 +1116,14 @@ function conversationItem(c) {
   title.type = "button";
   title.title = c.title;
   title.append(el("span", "conv-name", c.title));
+  // 調査中なら動く印、まだ見ていない回答があれば点を出す
+  if (jobFor(c.id)) {
+    item.classList.add("running");
+    title.append(el("span", "conv-state running", "調査中"));
+  } else if (c.unread && c.id !== currentId) {
+    item.classList.add("unread");
+    title.append(Object.assign(el("span", "conv-state unread", ""), { title: "まだ見ていない回答があります" }));
+  }
   title.addEventListener("click", () => openConversation(c.id));
   const del = el("button", "conv-delete", "×");
   del.type = "button";
@@ -903,6 +1294,7 @@ function renderHead(draft) {
   titleEl.classList.toggle("editable", Boolean(c));
   titleEl.title = c ? "クリックして名前を変える" : "";
   archiveButton.hidden = !c;
+  document.getElementById("export").hidden = !c;
   archiveButton.textContent = c?.archived ? "アーカイブから戻す" : "アーカイブ";
   const folder = activeFolder();
   crumb.hidden = !folder;
@@ -915,6 +1307,57 @@ function renderHead(draft) {
     moveSelect.value = c.folder_id ?? "";
   }
 }
+
+// ---- 書き出し ----
+
+// 開いている調査を、質問・回答・出典のMarkdownにしてファイルに保存する
+document.getElementById("export").addEventListener("click", async () => {
+  const c = currentConversation();
+  if (!c) return;
+  const { turns } = await api("GET", `/api/conversations/${c.id}`);
+  const blob = new Blob([conversationMarkdown(c.title, turns)], { type: "text/markdown" });
+  const link = Object.assign(el("a"), { href: URL.createObjectURL(blob), download: `${fileName(c.title)}.md` });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+});
+
+function conversationMarkdown(title, turns) {
+  const lines = [`# ${title}`, ""];
+  for (const t of turns) {
+    if (t.role === "user") {
+      lines.push(`## 質問${t.since ? `（${t.since} 以降の続報）` : ""}`, "", t.content, "");
+      continue;
+    }
+    lines.push(`## ${t.agent}所長の${t.kind === "clarify" ? "確認" : "回答"}${t.date ? `（${t.date}）` : ""}`, "", t.content, "");
+    const found = (t.links ?? []).filter((l) => l.found);
+    if (found.length) {
+      lines.push("### 出典", "");
+      found.forEach((l, i) => lines.push(`${i + 1}. [${l.title || l.url}](${l.url})${[l.source, l.date].filter(Boolean).map((x) => ` · ${x}`).join("")}`));
+      lines.push("");
+    }
+  }
+  return lines.join("\n");
+}
+
+function fileName(title) {
+  return title.replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 60) || "調査";
+}
+
+// ---- キーボード ----
+
+document.addEventListener("keydown", (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && !e.shiftKey && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    search.focus();
+    search.select();
+  } else if (mod && e.shiftKey && e.key.toLowerCase() === "o") {
+    e.preventDefault();
+    startNew(viewFolderId);
+  }
+});
 
 function renameConversation() {
   const c = currentConversation();
@@ -953,13 +1396,28 @@ function highlightCurrent() {
 // 1往復分の入れ物。質問を出し、回答はあとから足す
 // index は質問のターンの位置。やり直すときにサーバーへ渡す
 // images は質問に添えた画像のURL、imageText はそれを所長が文字に起こしたもの
-function turnView(question, index, { images = [], imageText = "", followup = false, since = "" } = {}) {
+// imageCount は、画像はあるがまだ見られない（別の画面から送った調査の途中）ときの枚数
+function turnView(question, index, { images = [], imageText = "", followup = false, since = "", imageCount = 0 } = {}) {
   const node = el("section", "turn");
   node.dataset.index = index;
+  // 質問の元の文章（作り直すときに使う。画面の吹き出しは貼ったファイルを整えて出すので、文字が違う）
+  node.question = question;
   node.images = images;
   node.followup = followup || Boolean(since);
   const block = el("div", "question-block");
-  const bubble = el("div", "question", question);
+  const bubble = el("div", "question");
+  bubble.append(...questionNodes(question));
+  // 貼ったログなどで長い質問は、たたんでおく
+  let more = null;
+  if (question.length > 600 || question.split("\n").length > 12) {
+    bubble.classList.add("clamped");
+    more = el("button", "question-more quiet", "全文を見る");
+    more.type = "button";
+    more.addEventListener("click", () => {
+      const open = bubble.classList.toggle("clamped");
+      more.textContent = open ? "全文を見る" : "たたむ";
+    });
+  }
   const edit = el("button", "question-edit", "編集");
   edit.type = "button";
   edit.title = "質問を直して調べ直す";
@@ -967,6 +1425,7 @@ function turnView(question, index, { images = [], imageText = "", followup = fal
   const row = el("div", "question-row");
   row.append(edit, bubble);
   block.append(row);
+  if (more) block.append(more);
   if (node.followup) block.append(el("span", "pill followup followup-since", since ? followupLabel(since) : "続報"));
   if (images.length) {
     const gallery = el("div", "question-images");
@@ -977,9 +1436,26 @@ function turnView(question, index, { images = [], imageText = "", followup = fal
     }
     block.append(gallery);
   }
+  if (imageCount) block.append(el("span", "pill unset", `画像${imageCount}枚（調査が終わると見られます）`));
   if (imageText) block.append(imageTextView(imageText));
   node.append(block);
   return node;
+}
+
+// 質問の文章。貼ったファイル（```` で囲んだ部分）だけは等幅で出す。ほかは書いたとおりに出す
+function questionNodes(text) {
+  const nodes = [];
+  let at = 0;
+  for (const m of text.matchAll(/^(`{3,})([^\n]*)\n([\s\S]*?)\n\1$/gm)) {
+    nodes.push(text.slice(at, m.index).replace(/\n+$/, ""));
+    const pre = el("pre", "question-code");
+    if (m[2].trim()) pre.append(el("span", "question-code-name", m[2].trim()));
+    pre.append(m[3]);
+    nodes.push(pre);
+    at = m.index + m[0].length;
+  }
+  nodes.push(text.slice(at).replace(/^\n+/, ""));
+  return nodes.filter((n) => n !== "");
 }
 
 function followupLabel(since) {
@@ -994,7 +1470,7 @@ function showFollowupOnLast() {
 }
 
 function askFollowup() {
-  if (running) return;
+  if (busy()) return explainBusy();
   ask("その後どうなった？", null, false, [], [], true);
 }
 
@@ -1013,7 +1489,8 @@ function confirmRedo(index) {
 
 // 画像はサーバーが元の質問のものを使い直すので、送らずに見せるだけ
 function redo(content, index, skipClarify = false) {
-  if (running || !confirmRedo(index)) return;
+  if (busy()) return explainBusy();
+  if (!confirmRedo(index)) return;
   const node = log.querySelector(`.turn[data-index="${index}"]`);
   ask(content, index, skipClarify, [], turnImages(index), Boolean(node?.followup));
 }
@@ -1029,7 +1506,7 @@ function setPlaceholder(lastTurn) {
 }
 
 function editQuestion(node, question, index) {
-  if (running) return;
+  if (busy()) return explainBusy();
   const row = node.querySelector(".question-row");
   const editor = el("div", "question-editor");
   const field = el("textarea");
@@ -1048,7 +1525,7 @@ function editQuestion(node, question, index) {
   submit.addEventListener("click", () => {
     const content = field.value.trim();
     if (!content) return;
-    if (running || !confirmRedo(index)) return;
+    if (busy() || !confirmRedo(index)) return;
     ask(content, index, false, [], node.images, node.followup);
   });
   field.addEventListener("keydown", (e) => {
@@ -1083,15 +1560,37 @@ function clarifyView({ agent, content }, index) {
   const skip = el("button", "", "聞き返さずに調べる");
   skip.type = "button";
   skip.title = "今の質問のまま、所員に調べさせます";
-  skip.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").querySelector(".question").textContent, index, true));
+  skip.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index, true));
   const actions = el("div", "answer-actions");
   actions.append(skip);
   body.append(markdownView(content), note, actions);
   return node;
 }
 
+// 調べる場所を選ばずに所長に相談したターン。出典や調査の記録はない
+function chatView({ agent, content, model, seconds, llm_calls, trace_id }, index) {
+  const { node, body, meta } = answerFrame(agent);
+  meta.replaceChildren(el("span", "pill unset", "相談（調べていません）"), " ", [model, seconds !== undefined && formatSeconds(seconds)].filter(Boolean).join(" · "));
+  const actions = el("div", "answer-actions");
+  actions.append(copyButton(content));
+  const regenerate = el("button", "", "作り直す");
+  regenerate.type = "button";
+  regenerate.title = "同じ頼みでもう一度答えてもらう（今選んでいる調べる場所で）";
+  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index));
+  actions.append(regenerate);
+  if (trace_id) {
+    const button = el("button", "", `LLMとのやりとり（${llm_calls}回）`);
+    button.type = "button";
+    button.addEventListener("click", () => openTrace(trace_id));
+    actions.append(button);
+  }
+  body.append(markdownView(content), actions);
+  return node;
+}
+
 function answerView(turn, index) {
   if (turn.kind === "clarify") return clarifyView(turn, index);
+  if (turn.kind === "chat") return chatView(turn, index);
   const { agent, content, model, reports, links, seconds, llm_calls, trace_id, memo_added } = turn;
   const { node, body, meta } = answerFrame(agent);
   const searches = reports.reduce((n, r) => n + r.steps.length, 0);
@@ -1113,7 +1612,7 @@ function answerView(turn, index) {
   const regenerate = el("button", "", "作り直す");
   regenerate.type = "button";
   regenerate.title = "同じ質問でもう一度調べる";
-  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").querySelector(".question").textContent, index));
+  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index));
   actions.append(regenerate);
   const followup = el("button", "followup-ask", "その後どうなった？");
   followup.type = "button";
@@ -1202,9 +1701,20 @@ function citations(answer, links) {
 }
 
 // 調査中の表示。所員ごとの状態と、届いた分の回答を出す
-function progressView() {
-  const { node, body, meta } = answerFrame(directorName);
-  meta.textContent = "所員が調べています…";
+// startedAt は調査を始めた時刻（秒）。かかっている時間を出す（ローカルLLMは時間がかかるので、止まっていないと分かるように）
+// consult なら調べずに所長が答えている（相談）
+function progressView(startedAt = Date.now() / 1000, consult = false) {
+  const { node, body, meta: head } = answerFrame(directorName);
+  const meta = el("span");
+  const elapsed = el("span", "elapsed");
+  head.append(meta, elapsed);
+  const tick = () => {
+    elapsed.textContent = formatElapsed(Date.now() / 1000 - startedAt);
+  };
+  tick();
+  // 画面から外れたら（回答に置き換わった・別の会話を開いた）止める。作ってすぐ画面に足すので、最初の1秒の間には足されている
+  const timer = setInterval(() => (node.isConnected ? tick() : clearInterval(timer)), 1000);
+  meta.textContent = consult ? "考えています…" : "所員が調べています…";
   const answer = el("div", "markdown streaming");
   const record = el("details", "record");
   record.open = true;
@@ -1253,7 +1763,7 @@ function progressView() {
       row.set(r.error ? "failed" : "done", r.error ? "失敗" : "報告済み", r.error ? "" : memberNote(r));
     } else if (event.type === "director_start") {
       directorName = event.agent;
-      meta.textContent = "報告をまとめています…";
+      meta.textContent = consult ? "考えています…" : "報告をまとめています…";
       // 再調査を頼む前に書きかけた文章は捨てる
       answerText = "";
       answer.replaceChildren();
@@ -1271,7 +1781,16 @@ function progressView() {
     }
     scrollToBottom();
   };
-  return { node, update };
+  // つなぎ直したときに、始めから流れてくる進み具合で描き直す
+  const reset = () => {
+    meta.textContent = consult ? "考えています…" : "所員が調べています…";
+    answerText = "";
+    answer.replaceChildren();
+    members.replaceChildren();
+    rows.clear();
+    record.hidden = true;
+  };
+  return { node, update, reset };
 }
 
 function membersView(rows) {
@@ -1320,6 +1839,11 @@ function memberView(report) {
 
 function memberNote(report) {
   return [`検索${report.steps.length}回`, report.seconds !== undefined && formatSeconds(report.seconds)].filter(Boolean).join(" · ");
+}
+
+function formatElapsed(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  return s < 60 ? `${s}秒` : `${Math.floor(s / 60)}分${String(s % 60).padStart(2, "0")}秒`;
 }
 
 function formatSeconds(seconds) {
@@ -1398,22 +1922,22 @@ function copyButton(text) {
 function markdownView(text) {
   const node = el("div", "markdown");
   node.append(renderMarkdown(text));
+  // コードブロック（コマンドや設定）は、そのままコピーできるようにする
+  for (const pre of node.querySelectorAll("pre")) {
+    const button = copyButton(pre.textContent);
+    button.classList.add("code-copy");
+    button.title = "このコードをコピー";
+    pre.append(button);
+  }
   return node;
 }
 
 // ---- 通信と小物 ----
 
-// NDJSON（1行1イベント）のレスポンスを読みながら onEvent を呼ぶ。onEvent が投げた例外はそのまま伝わる
-async function streamTurn(path, body, onEvent) {
-  const res = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const data = await res.json();
-    throw new Error(data.error || res.statusText);
-  }
+// NDJSON（1行1イベント）のレスポンスを読みながら onEvent を呼ぶ。切れたら返る
+async function readLines(path, onEvent) {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) throw new Error(res.statusText);
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buffer = "";
   for (;;) {
@@ -1444,15 +1968,23 @@ function el(tag, className, text) {
   return node;
 }
 
+// 自分で足したもの（質問など）は、読んでいた位置にかかわらず見せる
 function append(node) {
   log.append(node);
+  followBottom = true;
   scrollToBottom();
   return node;
 }
 
+// 一番下を見ているときだけ、届いた分に合わせて下へ送る（上の方を読んでいるときは動かさない）
 function scrollToBottom() {
-  log.scrollTop = log.scrollHeight;
+  if (followBottom) log.scrollTop = log.scrollHeight;
 }
+
+let followBottom = true;
+log.addEventListener("scroll", () => {
+  followBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+});
 
 function showEmpty() {
   openedConversation = null;
@@ -1480,7 +2012,9 @@ function showEmpty() {
   const note = folder
     ? "このフォルダの調査は、フォルダで選んだ調べる場所を引き継ぎます。"
     : "所員が選んだ場所を手分けして調べ、所長が経緯を根拠のリンクつきでまとめます。";
-  node.append(logo, el("h2", "", heading), el("p", "", note), examples);
+  const destination = el("p", "destination-note", destinationNote);
+  destination.id = "destination-note";
+  node.append(logo, el("h2", "", heading), el("p", "", note), examples, destination);
   log.replaceChildren(node);
 }
 
@@ -1495,3 +2029,4 @@ function autosize() {
 Promise.all([loadConfig(), refreshFolders()]).then(() => applySelection());
 refreshList();
 showEmpty();
+connectEvents();

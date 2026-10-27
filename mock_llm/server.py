@@ -6,12 +6,15 @@
 - 所長の受付（ask_user が渡される）では、質問に「あの件」が含まれていれば聞き返し、そうでなければ調べる
 - 所長のメモ（remember が渡される）では、質問に「覚えて」が含まれていればメモに書き足し、そうでなければ何もしない
 - 画像を見せられたら、決まった読み取り結果を返す
+- 題名を付ける依頼なら、最初の質問から「〇〇の件」と返す
 - 直前がツール結果なら、その結果を要約したことにして最終回答を返す
 - ツールなしで呼ばれたら、受け取った内容をそのまま返す
 - stream: true なら、同じ内容を少しずつSSEで返す（画面で逐次表示を確かめられるよう、間を置く）
+- MOCK_DELAY（秒）を指定すると、毎回その分だけ待ってから返す（ローカルLLMの遅さを真似る）
 """
 
 import json
+import os
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,6 +51,12 @@ def respond(req: dict) -> dict:
     if isinstance(raw, list) and any(part.get("type") == "image_url" for part in raw):
         content = "[mock] 画像の内容: エラー画面。「Disk quota exceeded」と表示されている（mon01、2026-10-07 03:12）"
         return _completion(model, {"role": "assistant", "content": content}, "stop")
+
+    # 題名を付ける依頼なら、質問の最初の行から作る
+    system = _text(req["messages"][0].get("content"))
+    if "題名" in system and not req.get("tools"):
+        first = last["content"].split("## 質問\n- ", 1)[-1].split("\n")[0]
+        return _completion(model, {"role": "assistant", "content": f"「{first[:16]}の件」"}, "stop")
 
     all_tools = {t["function"]["name"]: t["function"] for t in req.get("tools") or []}
     tools = [name for name, f in all_tools.items() if set(f["parameters"].get("required", [])) <= {"query"}]
@@ -100,12 +109,16 @@ def chunks(completion: dict):
     yield chunk({}, choice["finish_reason"])
 
 
+DELAY = float(os.environ.get("MOCK_DELAY", "0"))
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.path.endswith("/chat/completions"):
             self.send_error(404)
             return
         req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        time.sleep(DELAY)
         if req.get("stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")

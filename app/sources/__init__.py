@@ -64,9 +64,7 @@ def resolve_scopes(selected: list[Source], scopes: dict) -> dict[str, list[str]]
 
 
 def resolve(source_ids: list[str]) -> list[Source]:
-    """指定されたソースを返す。使えないソースが含まれていたら SourceError。"""
-    if not source_ids:
-        raise SourceError("ソースを1つ以上選んでください")
+    """指定されたソースを返す。使えないソースが含まれていたら SourceError。空なら空（調べずに所長に相談する）。"""
     by_id = {s.id: s for s in all_sources()}
     selected = []
     for source_id in dict.fromkeys(source_ids):  # 重複を除く

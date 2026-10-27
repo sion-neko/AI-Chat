@@ -113,6 +113,34 @@ class AgentTest(unittest.TestCase):
         self.assertIn("seconds", turn["reports"][0]["steps"][0])
         self.assertGreaterEqual(turn["seconds"], turn["reports"][0]["seconds"])
 
+    def test_consult_without_sources(self):
+        llm = FakeLLM([], ask="聞き返さないはず", notes=[{"scope": "global", "note": "書かないはず"}])
+        with mock.patch.object(agent, "_llm", llm):
+            turn = agent.run_turn([], "この文章を要約して", [], self.events.append, memos={"global": "結論から書く", "folder": None})
+        self.assertEqual((turn["kind"], turn["content"], turn["model"]), ("chat", "回答", "fake-1"))
+        self.assertNotIn("reports", turn)
+        self.assertEqual([c["who"] for c in turn["trace"]], ["シロ所長（相談）"])
+        self.assertIn("結論から書く", turn["trace"][0]["messages"][0]["content"])
+        self.assertEqual([e["type"] for e in self.events if e["type"] != "delta"], ["director_start"])
+
+    def test_long_history_keeps_first_and_recent(self):
+        history = [{"role": "user" if i % 2 == 0 else "assistant", "content": str(i)} for i in range(30)]
+        kept = [m.content for m in agent._history_messages(history)]
+        self.assertEqual(kept, ["0", "1", *[str(i) for i in range(30 - agent.HISTORY_TURNS, 30)]])
+        self.assertEqual(len(agent._history_messages(history[:12])), 12)
+
+    def test_explain_error(self):
+        import httpx
+        import openai
+
+        request = httpx.Request("POST", "http://llm/v1/chat/completions")
+        with mock.patch.dict(os.environ, {"LLM_BASE_URL": "http://llm/v1"}):
+            self.assertIn("LLM_BASE_URL", agent.explain_error(openai.APIConnectionError(request=request)))
+        self.assertIn("LLM_TIMEOUT", agent.explain_error(openai.APITimeoutError(request=request)))
+        too_long = openai.BadRequestError("This model's maximum context length is 8192 tokens", response=httpx.Response(400, request=request), body=None)
+        self.assertIn("長すぎて", agent.explain_error(too_long))
+        self.assertEqual(agent.explain_error(ValueError("x")), "ValueError: x")
+
     def test_followup_runs_member_again_then_answers(self):
         llm = FakeLLM([{"source": "dummy_chat", "instruction": "10月に絞って"}, {"source": "nope", "instruction": "x"}])
         turn = self.run_turn(llm)

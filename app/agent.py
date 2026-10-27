@@ -29,6 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import base64
 
+import openai
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_openai import ChatOpenAI
@@ -120,6 +121,15 @@ DIRECTOR_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name
 - 報告では答えきれないとき（結末が分からない、報告どうしが食い違う、検索語や期間の見落としがありそう等）は、
   request_reinvestigation で所員に再調査を頼める。頼むのは本当に必要なときだけにし、何をどう調べ直すかを具体的に書く"""
 
+# 調べる場所を選ばずに頼まれたとき（相談）。所員は動かさず、所長がそのまま答える
+CHAT_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name}」です。{persona}
+今回は所員に調べさせず、依頼人の頼みにあなたが直接応えます。今日は {today} です。
+
+- 貼られた文章の要約・言い換え・翻訳・下書き・整理・相談などに、そのまま応える
+- 社内の出来事や経緯など、調べないと分からない事実は推測で答えない。
+  「調べる場所を選んで依頼すれば、所員が調べます」と伝える
+- 回答はMarkdownで書いてよい"""
+
 # 続報を調べるとき（「その後どうなった？」）に足す
 MEMBER_SINCE_NOTE = """
 
@@ -159,8 +169,16 @@ REMEMBER_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name
 - {scopes}
 - 書き足すことがなければ、何も呼ばずに「なし」とだけ答える"""
 
+# 所長に渡す過去のやりとりのターン数（最初のやりとりは別に渡す）。ローカルLLMの文脈を使い切らないように
+HISTORY_TURNS = 10
+
 # 1回の調査でメモに書き足す件数の上限
 REMEMBER_LIMIT = 3
+
+TITLE_PROMPT = """依頼人の質問と、それへの回答を読み、この調査にあとで一覧から探しやすい短い題名を付けてください。
+- {length}文字以内。何の件かが分かる名詞句にする（例: 監視サーバーのディスク増設、VPN証明書の更新手順）
+- 題名だけを1行で書く。かぎかっこや句点は付けない"""
+TITLE_LENGTH = 24
 
 # LLMを同時に呼ぶ数の上限。所員は並列に動くので、GPU1台のローカルLLMサーバーが詰まらないよう絞る
 LLM_CONCURRENCY = int(os.environ.get("LLM_CONCURRENCY") or 2)
@@ -182,6 +200,24 @@ def _llm_slot():
     """LLMを呼ぶ間だけ枠を1つ使う。LLMの呼び出しはすべてこの中で行う。"""
     with _llm_slots:
         yield
+
+
+def explain_error(e: Exception) -> str:
+    """調査が失敗したときに画面に出す文。LLMのよくある失敗は、何を確かめればよいかを添える。"""
+    detail = f"{type(e).__name__}: {e}"
+    if isinstance(e, openai.APITimeoutError):
+        hint = f"LLMが{LLM_TIMEOUT:g}秒のうちに答えませんでした。LLMのサーバーが混んでいないか確かめ、必要なら .env の LLM_TIMEOUT を延ばしてください"
+    elif isinstance(e, openai.APIConnectionError):
+        hint = f"LLMにつながりません（{os.environ['LLM_BASE_URL']}）。LLMのサーバーが動いているか、.env の LLM_BASE_URL を確かめてください"
+    elif isinstance(e, openai.AuthenticationError):
+        hint = "LLMに断られました。.env の LLM_API_KEY を確かめてください"
+    elif isinstance(e, openai.NotFoundError):
+        hint = f"LLMにモデル {os.environ['LLM_MODEL']} が見つかりません。.env の LLM_MODEL を確かめてください"
+    elif isinstance(e, openai.BadRequestError) and any(w in str(e).lower() for w in ("context", "too long", "maximum", "token")):
+        hint = "会話や貼った文章が長すぎて、LLMが一度に読める量を超えました。新しい調査で、必要な部分だけを貼って聞き直してください"
+    else:
+        return detail
+    return f"{hint}（{detail}）"
 
 
 def describe_image(data_url: str, purpose: str, trace: Trace, who: str) -> str:
@@ -316,7 +352,7 @@ def run_member(
                 elif isinstance(msg, AIMessage):
                     report["content"] = msg.text
     except Exception as e:
-        report["error"] = f"{type(e).__name__}: {e}"
+        report["error"] = explain_error(e)
 
     report["seconds"] = round(time.monotonic() - started, 2)
     emit({"type": "member_done", "report": report})
@@ -425,7 +461,7 @@ def check_llm() -> dict:
         with _llm_slot():
             answer = _llm.invoke([HumanMessage("接続の確認です。「OK」とだけ返してください。")])
     except Exception as e:
-        return {"state": "error", "message": f"{type(e).__name__}: {e}"}
+        return {"state": "error", "message": explain_error(e)}
     model = answer.response_metadata.get("model_name") or os.environ["LLM_MODEL"]
     return {"state": "ok", "message": f"{model} が応答しました"}
 
@@ -452,6 +488,9 @@ def user_text(turn: dict) -> str:
 
 
 def _history_messages(history: list[dict]) -> list:
+    """所長に渡す過去のやりとり。長い会話は、最初のやりとり（何の話か）と直近の HISTORY_TURNS ターンだけにする。"""
+    if len(history) > HISTORY_TURNS + 2:
+        history = history[:2] + history[-HISTORY_TURNS:]
     return [HumanMessage(user_text(t)) if t["role"] == "user" else AIMessage(t["content"]) for t in history]
 
 
@@ -549,6 +588,45 @@ def remember(
     return notes[:REMEMBER_LIMIT]
 
 
+def make_title(questions: list[str], answer: str) -> str | None:
+    """調査の題名を付ける。最初の質問がそのまま題名になると、「あの件どうなった？」のような一覧で見分けにくいものが並ぶため。
+
+    題名は補助なので、LLMの呼び出しに失敗したり、使えない題名が返ったりしたら None。
+    """
+    asked = "\n".join(f"- {q}" for q in questions)
+    messages = [SystemMessage(TITLE_PROMPT.format(length=TITLE_LENGTH)), HumanMessage(f"## 質問\n{asked}\n\n## 回答\n{answer[:2000]}")]
+    try:
+        with _llm_slot():
+            response = _llm.invoke(messages)
+    except Exception:
+        return None
+    lines = [line for line in response.text.splitlines() if line.strip()]
+    title = lines[0].strip().strip("「」『』\"'#*。 ") if lines else ""
+    return title[: TITLE_LENGTH * 2] or None
+
+
+def consult(
+    director: characters.Character, history: list[dict], asked: str, emit: Emit, trace: Trace, memo: str, extra: dict, started: float
+) -> dict:
+    """調べる場所を選ばずに頼まれたとき。所員は動かさず、所長がそのまま答える（聞き返しもメモへの書き足しもしない）。"""
+    emit({"type": "director_start", "agent": director.name})
+    prompt = CHAT_PROMPT.format(name=director.name, persona=director.persona, today=date.today()) + memo
+    messages = [SystemMessage(prompt), *_history_messages(history), HumanMessage(asked)]
+    answer = _stream(_llm, messages, emit, trace, f"{director.name}所長（相談）", [])
+    return {
+        "role": "assistant",
+        "kind": "chat",
+        "agent": director.name,
+        "date": date.today().isoformat(),
+        "content": answer.text,
+        "model": answer.response_metadata.get("model_name") or os.environ["LLM_MODEL"],
+        **extra,
+        "seconds": round(time.monotonic() - started, 2),
+        "llm_calls": len(trace.calls),
+        "trace": trace.calls,
+    }
+
+
 def member_questions(history: list[dict], question: str) -> list[str]:
     """所員に渡す、これまでの質問。所長が聞き返した後の答えには、その確認を添える。"""
     questions = []
@@ -593,6 +671,7 @@ def run_turn(
     直前に聞き返したばかりのときも、続けては聞き返さない。
     since（YYYY-MM-DD）があれば続報の調査（「その後どうなった？」）。その日より後の動きだけを調べ、聞き返さない。
     聞き返したときは kind: "clarify" のターンを返す（reports などは持たない）。
+    sources が空なら相談（consult）。調べずに所長が答え、kind: "chat" のターンを返す。
 
     trace（LLMとのやりとり）は大きいので、保存する側が会話とは分けて保存する。
     """
@@ -604,7 +683,7 @@ def run_turn(
     asked = user_text({"content": question, "image_text": image_text})
     extra = {"image_text": image_text} if image_text else {}
 
-    if clarify and not since and not (history and history[-1].get("kind") == "clarify"):
+    if sources and clarify and not since and not (history and history[-1].get("kind") == "clarify"):
         emit({"type": "intake_start", "agent": director.name})
         if ask := intake(director, history, asked, trace, memo):
             return {
@@ -619,6 +698,9 @@ def run_turn(
                 "llm_calls": len(trace.calls),
                 "trace": trace.calls,
             }
+
+    if not sources:
+        return consult(director, history, asked, emit, trace, memo, extra, started)
 
     questions = member_questions(history, asked)
     with ThreadPoolExecutor(max_workers=len(sources)) as pool:
