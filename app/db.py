@@ -6,6 +6,7 @@
              再調査の報告は request（所長からの依頼）を持ち、最初の報告の後ろに並ぶ
              links: [{"url", "found"}] 回答のリンクが検索結果にあったか（app/links.py）
              seconds, llm_calls: かかった時間とLLMの呼び出し回数
+             kind: "clarify" なら、調べる前に所長が聞き返したターン（content が質問。reports・links は持たない）
              trace_id: LLMとのやりとりの記録（traces テーブル。プロンプトを丸ごと含み大きいので分けて持つ）
 """
 

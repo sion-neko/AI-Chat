@@ -19,10 +19,12 @@ API:
   GET    /api/status                      LLMの設定と、すべてのソース（未設定のものも）
   POST   /api/check                       LLMと設定済みのソースに実際につないでみる
 
+skip_clarify: true なら所長は聞き返さずに調べる。
 sources は検索に使うソースIDの配列。scopes は {ソースID: [リポジトリやチャンネルの名前]}（省略可。ないソースは絞らない）。
 
 質問するPOSTは、進み具合をNDJSON（1行1イベント）で逐次返す。
   {"type": "start", "turn_id"}                  調査を始めた。中止するときに turn_id を使う
+  {"type": "intake_start", "agent"}             所長が依頼を受け付けている（曖昧なら聞き返す）
   {"type": "member_start", "source", "agent"}   所員が調査を始めた
   {"type": "tool", "source", "tool", "args"}     所員が検索した
   {"type": "member_done", "report"}             所員が報告した
@@ -199,7 +201,7 @@ class Handler(BaseHTTPRequestHandler):
             selected = sources.resolve(req["sources"])
             scopes = sources.resolve_scopes(selected, req.get("scopes") or {})
             conv_id = db.create_conversation(req["content"][:TITLE_LENGTH])
-            return self._stream_turn(conv_id, [], req["content"], selected, scopes, is_new=True)
+            return self._stream_turn(conv_id, [], req["content"], selected, scopes, is_new=True, clarify=not req.get("skip_clarify"))
         if m := re.fullmatch(r"/api/conversations/(\w+)/messages", self.path):
             history = db.load_turns(m[1])
             if history is None:
@@ -212,7 +214,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not (isinstance(start, int) and 0 <= start < len(history) and history[start]["role"] == "user"):
                     raise InputError("やり直す質問の位置が正しくありません")
                 history = history[:start]
-            return self._stream_turn(m[1], history, req["content"], selected, scopes, is_new=False, replace_from=start)
+            return self._stream_turn(
+                m[1], history, req["content"], selected, scopes, is_new=False, replace_from=start, clarify=not req.get("skip_clarify")
+            )
         if self.path == "/api/check":
             return self._send_json(200, check())
         if m := re.fullmatch(r"/api/turns/(\w+)/cancel", self.path):
@@ -257,6 +261,7 @@ class Handler(BaseHTTPRequestHandler):
         scopes: dict[str, list[str]],
         is_new: bool,
         replace_from: int | None = None,
+        clarify: bool = True,
     ):
         """調査を別スレッドで走らせ、キューに溜まったイベントを1行ずつ書き出す。
 
@@ -274,7 +279,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def work():
             try:
-                turn = agent.run_turn(history, question, selected, emit, scopes)
+                turn = agent.run_turn(history, question, selected, emit, scopes, clarify)
                 turn["trace_id"] = db.save_trace(conv_id, turn.pop("trace"))
                 new_turns = [{"role": "user", "content": question}, turn]
                 if replace_from is None:

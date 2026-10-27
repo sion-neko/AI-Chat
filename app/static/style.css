@@ -738,3 +738,5 @@ dialog.wide { width: min(900px, calc(100vw - 32px)); }
 .scope-list > .scope-choice:first-child { border-top: none; }
 
 .scope-choice:hover { background: var(--shelf); }
+
+.clarify-note { margin-top: 6px; font-size: var(--text-sm); color: var(--muted); }

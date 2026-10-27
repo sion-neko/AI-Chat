@@ -26,8 +26,9 @@ SCOPED = Source(id="scoped", label="範囲つき", tools=[search_scoped], config
 class FakeLLM:
     """ツールを渡されたかどうかと会話の中身から、決まった応答を返すLLM。"""
 
-    def __init__(self, director_requests: list[dict]):
+    def __init__(self, director_requests: list[dict], ask: str | None = None):
         self.director_requests = director_requests
+        self.ask = ask  # 受付で聞き返す内容（None なら聞き返さない）
         self.tools = []
         self.director_calls = 0
 
@@ -44,6 +45,10 @@ class FakeLLM:
     def invoke(self, messages):
         names = [t["function"]["name"] if isinstance(t, dict) else t.name for t in self.tools]
         last = messages[-1]
+        if names == ["ask_user"]:  # 所長の受付
+            if self.ask:
+                return AIMessage("", tool_calls=[{"id": "a1", "name": "ask_user", "args": {"question": self.ask}}])
+            return AIMessage("調査します")
         if "request_reinvestigation" in names or not names:  # 所長
             root = getattr(self, "parent", self)
             root.director_calls += 1
@@ -79,10 +84,10 @@ class AgentTest(unittest.TestCase):
         self.assertEqual([r["source"] for r in turn["reports"]], ["dummy_chat", "dummy_wiki"])
         self.assertEqual(llm.director_calls, 1)
 
-        # 所員2人 × (検索の判断 + 報告) と所長1回。誰の呼び出しかと、送った内容が残る
+        # 受付1回、所員2人 × (検索の判断 + 報告)、所長1回。誰の呼び出しかと、送った内容が残る
         whos = [c["who"] for c in turn["trace"]]
-        self.assertEqual(turn["llm_calls"], 5)
-        self.assertCountEqual(whos, ["シロ所長", "コソリ（ダミーWiki）", "コソリ（ダミーWiki）", "ポルタ（ダミーチャット）", "ポルタ（ダミーチャット）"])
+        self.assertEqual(turn["llm_calls"], 6)
+        self.assertCountEqual(whos, ["シロ所長（受付）", "シロ所長", "コソリ（ダミーWiki）", "コソリ（ダミーWiki）", "ポルタ（ダミーチャット）", "ポルタ（ダミーチャット）"])
         director_call = turn["trace"][whos.index("シロ所長")]
         self.assertEqual(director_call["tools"], ["request_reinvestigation"])
         self.assertEqual(director_call["messages"][0]["role"], "system")
@@ -122,6 +127,44 @@ class AgentTest(unittest.TestCase):
         self.assertNotIn("scope", chat)
         prompt = next(c for c in turn["trace"] if c["who"].endswith("（範囲つき）"))["messages"][1]["content"]
         self.assertIn("検索範囲（リポジトリ）は次に絞られています: me/infra", prompt)
+
+    def test_clarify_then_answer(self):
+        llm = FakeLLM([], ask="どのサーバーの話ですか？（監視サーバー・ファイルサーバーなど）")
+        with mock.patch.object(agent, "_llm", llm):
+            first = agent.run_turn([], "あの件どうなった？", [dummy.CHAT], self.events.append)
+            self.assertEqual(first["kind"], "clarify")
+            self.assertEqual(first["content"], "どのサーバーの話ですか？（監視サーバー・ファイルサーバーなど）")
+            self.assertNotIn("reports", first)
+            self.assertEqual(llm.director_calls, 0)
+
+            # 答えると、続けては聞き返さずに調べる。所員には確認と答えを合わせて渡す
+            history = [{"role": "user", "content": "あの件どうなった？"}, first]
+            second = agent.run_turn(history, "監視サーバー", [dummy.CHAT], self.events.append)
+        self.assertNotIn("kind", second)
+        prompt = next(c for c in second["trace"] if c["who"].startswith("ポルタ"))["messages"][1]["content"]
+        self.assertIn("- あの件どうなった？", prompt)
+        self.assertIn("今回の質問: 監視サーバー（所長の確認「どのサーバーの話ですか？（監視サーバー・ファイルサーバーなど）」への答え）", prompt)
+
+    def test_skip_clarify(self):
+        llm = FakeLLM([], ask="どの件ですか？")
+        with mock.patch.object(agent, "_llm", llm):
+            turn = agent.run_turn([], "あの件どうなった？", [dummy.CHAT], self.events.append, clarify=False)
+        self.assertNotIn("kind", turn)
+        self.assertFalse(any(c["who"].endswith("（受付）") for c in turn["trace"]))
+
+    def test_intake_failure_does_not_stop_investigation(self):
+        llm = FakeLLM([])
+        original = llm.bind_tools
+
+        def bind_tools(tools):
+            if any(isinstance(t, dict) and t["function"]["name"] == "ask_user" for t in tools):
+                raise RuntimeError("tools not supported")
+            return original(tools)
+
+        llm.bind_tools = bind_tools
+        with mock.patch.object(agent, "_llm", llm):
+            turn = agent.run_turn([], "ディスク", [dummy.CHAT], self.events.append)
+        self.assertEqual(turn["content"], "回答")
 
     def test_cancel_stops_whole_turn(self):
         def emit(event):

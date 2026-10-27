@@ -122,7 +122,8 @@ form.addEventListener("submit", (e) => {
 });
 
 // 質問して調査させる。fromTurn（質問のターンの位置）があれば、そこから後をやり直す
-async function ask(content, fromTurn) {
+// skipClarify なら所長は聞き返さずに調べる
+async function ask(content, fromTurn, skipClarify = false) {
   if (document.getElementById("empty")) {
     log.replaceChildren();
     renderHead({ title: content, tags: [] });
@@ -142,6 +143,7 @@ async function ask(content, fromTurn) {
     const path = currentId ? `/api/conversations/${currentId}/messages` : "/api/conversations";
     const body = { content, sources: selectedSources(), scopes: selectedScopes };
     if (fromTurn !== null) body.from_turn = fromTurn;
+    if (skipClarify) body.skip_clarify = true;
     let result = null;
     await streamTurn(path, body, (event) => {
       if (event.type === "error") throw new Error(event.message);
@@ -160,6 +162,7 @@ async function ask(content, fromTurn) {
     }
     progress.node.replaceWith(answerView(result.turn, index));
     turnCount = index + 2;
+    setPlaceholder(result.turn);
     if (!currentId) {
       currentId = result.conversation_id;
       await refreshList();
@@ -405,6 +408,7 @@ async function openConversation(id) {
   turnCount = data.turns.length;
   log.replaceChildren(...nodes);
   log.scrollTop = log.scrollHeight;
+  setPlaceholder(data.turns.at(-1));
   highlightCurrent();
 }
 
@@ -596,9 +600,15 @@ function confirmRedo(index) {
   return confirm("この質問より後のやりとりは消えます。調べ直しますか？");
 }
 
-function redo(content, index) {
+function redo(content, index, skipClarify = false) {
   if (running || !confirmRedo(index)) return;
-  ask(content, index);
+  ask(content, index, skipClarify);
+}
+
+// 所長が聞き返しているときは、答えを書く欄だと分かるようにする（元の文言は最初に1度だけ覚える）
+function setPlaceholder(lastTurn) {
+  input.dataset.placeholder ??= input.placeholder;
+  input.placeholder = lastTurn?.kind === "clarify" ? "所長の質問に答える（Enterで送信）" : input.dataset.placeholder;
 }
 
 function editQuestion(node, question, index) {
@@ -648,7 +658,24 @@ function answerFrame(agent) {
   return { node, body, meta };
 }
 
-function answerView({ agent, content, model, reports, links, seconds, llm_calls, trace_id }, index) {
+// 調べる前に所長が聞き返したターン
+function clarifyView({ agent, content }, index) {
+  const { node, body, meta } = answerFrame(agent);
+  meta.replaceChildren(el("span", "pill followup", "確認"));
+  const note = el("div", "clarify-note", "答えを下の入力欄に書いてください。");
+  const skip = el("button", "", "聞き返さずに調べる");
+  skip.type = "button";
+  skip.title = "今の質問のまま、所員に調べさせます";
+  skip.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").querySelector(".question").textContent, index, true));
+  const actions = el("div", "answer-actions");
+  actions.append(skip);
+  body.append(markdownView(content), note, actions);
+  return node;
+}
+
+function answerView(turn, index) {
+  if (turn.kind === "clarify") return clarifyView(turn, index);
+  const { agent, content, model, reports, links, seconds, llm_calls, trace_id } = turn;
   const { node, body, meta } = answerFrame(agent);
   const searches = reports.reduce((n, r) => n + r.steps.length, 0);
   const members = new Set(reports.map((r) => r.source)).size;
@@ -738,6 +765,7 @@ function progressView() {
   const answer = el("div", "markdown streaming");
   const record = el("details", "record");
   record.open = true;
+  record.hidden = true; // 所員が動き出してから出す
   const members = membersView([]);
   record.append(el("summary", "", "調査の様子"), members);
   body.append(answer, record);
@@ -760,7 +788,11 @@ function progressView() {
   };
 
   const update = (event) => {
-    if (event.type === "member_start") {
+    if (event.type === "intake_start") {
+      meta.textContent = "依頼の内容を確かめています…";
+    } else if (event.type === "member_start") {
+      record.hidden = false;
+      meta.textContent = "所員が調べています…";
       if (!rows.has(event.source)) {
         const row = memberRow(event.agent, sourceLabels.get(event.source) ?? event.source);
         rows.set(event.source, row);
@@ -978,6 +1010,7 @@ function scrollToBottom() {
 function showEmpty() {
   openedConversation = null;
   turnCount = 0;
+  setPlaceholder(null);
   renderHead();
   const node = el("div", "empty");
   node.id = "empty";
