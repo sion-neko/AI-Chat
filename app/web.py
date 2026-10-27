@@ -2,11 +2,14 @@
 
 API:
   GET    /api/config
-  GET    /api/conversations               会話一覧
+  GET    /api/conversations?q=&archived=1 会話一覧。q は空白区切りのAND（tag:名前 でタグ、それ以外はタイトルと中身）
+  PATCH  /api/conversations/{id}          {title?, archived?, tags?} 名前・アーカイブ・タグを変える
+  GET    /api/tags                        使われているタグの一覧
   POST   /api/conversations               {content, sources} 新しい会話を作って最初の質問をする
   GET    /api/conversations/{id}          会話の中身（ターン単位）
   GET    /api/traces/{trace_id}           1ターン分のLLMとのやりとり
-  POST   /api/conversations/{id}/messages {content, sources} 続きの質問をする
+  POST   /api/conversations/{id}/messages {content, sources, from_turn?} 続きの質問をする
+                                          from_turn（質問のターンの位置）があれば、そこから後を消して質問し直す（成功したときだけ置き換える）
   DELETE /api/conversations/{id}
   POST   /api/turns/{turn_id}/cancel        調査中のターンを中止する（turn_id は start イベントで届く）
   GET    /api/characters                  所長と所員（使えるソースの分）
@@ -16,10 +19,12 @@ API:
   GET    /api/status                      LLMの設定と、すべてのソース（未設定のものも）
   POST   /api/check                       LLMと設定済みのソースに実際につないでみる
 
+skip_clarify: true なら所長は聞き返さずに調べる。
 sources は検索に使うソースIDの配列。scopes は {ソースID: [リポジトリやチャンネルの名前]}（省略可。ないソースは絞らない）。
 
 質問するPOSTは、進み具合をNDJSON（1行1イベント）で逐次返す。
   {"type": "start", "turn_id"}                  調査を始めた。中止するときに turn_id を使う
+  {"type": "intake_start", "agent"}             所長が依頼を受け付けている（曖昧なら聞き返す）
   {"type": "member_start", "source", "agent"}   所員が調査を始めた
   {"type": "tool", "source", "tool", "args"}     所員が検索した
   {"type": "member_done", "report"}             所員が報告した
@@ -38,6 +43,7 @@ import queue
 import re
 import threading
 import traceback
+import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,6 +54,34 @@ from app import agent, characters, db, sources
 STATIC_DIR = Path(__file__).parent / "static"
 CONTENT_TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
 TITLE_LENGTH = 40
+TAG_LENGTH = 20
+TAG_COUNT = 10
+
+
+class InputError(Exception):
+    """リクエストの中身が不正。メッセージはそのまま画面に出る。"""
+
+
+def conversation_changes(req: dict) -> dict:
+    """会話の名前・アーカイブ・タグの変更を確かめて、db.update_conversation に渡せる形にする。"""
+    changes = {}
+    if "title" in req:
+        title = str(req["title"]).strip()
+        if not title:
+            raise InputError("名前を入れてください")
+        changes["title"] = title[:TITLE_LENGTH * 2]
+    if "archived" in req:
+        changes["archived"] = bool(req["archived"])
+    if "tags" in req:
+        if not isinstance(req["tags"], list):
+            raise InputError("タグは配列で送ってください")
+        tags = list(dict.fromkeys(str(t).strip().removeprefix("tag:") for t in req["tags"] if str(t).strip()))
+        if any(len(t) > TAG_LENGTH or " " in t for t in tags):
+            raise InputError(f"タグは空白なしの{TAG_LENGTH}文字以内にしてください")
+        if len(tags) > TAG_COUNT:
+            raise InputError(f"タグは{TAG_COUNT}個までにしてください")
+        changes["tags"] = tags
+    return changes
 
 # 調査中のターン。turn_id → 中止の合図
 RUNNING: dict[str, threading.Event] = {}
@@ -107,7 +141,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self, fn):
         try:
             fn()
-        except (sources.SourceError, characters.CharacterError) as e:
+        except (sources.SourceError, characters.CharacterError, InputError) as e:
             self._send_json(400, {"error": str(e)})
         except Exception as e:
             traceback.print_exc()
@@ -122,14 +156,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         self._handle(self._put)
 
+    def do_PATCH(self):
+        self._handle(self._patch)
+
     def do_DELETE(self):
         self._handle(self._delete)
 
     def _get(self):
+        url = urllib.parse.urlsplit(self.path)
+        query = dict(urllib.parse.parse_qsl(url.query))
         if self.path == "/api/config":
             return self._send_json(200, config())
-        if self.path == "/api/conversations":
-            return self._send_json(200, db.list_conversations())
+        if url.path == "/api/conversations":
+            return self._send_json(200, db.list_conversations(query.get("q", ""), query.get("archived") == "1"))
+        if self.path == "/api/tags":
+            return self._send_json(200, db.all_tags())
         if self.path == "/api/characters":
             return self._send_json(200, character_list())
         if m := re.fullmatch(r"/api/sources/(\w+)/scopes", self.path):
@@ -160,7 +201,7 @@ class Handler(BaseHTTPRequestHandler):
             selected = sources.resolve(req["sources"])
             scopes = sources.resolve_scopes(selected, req.get("scopes") or {})
             conv_id = db.create_conversation(req["content"][:TITLE_LENGTH])
-            return self._stream_turn(conv_id, [], req["content"], selected, scopes, is_new=True)
+            return self._stream_turn(conv_id, [], req["content"], selected, scopes, is_new=True, clarify=not req.get("skip_clarify"))
         if m := re.fullmatch(r"/api/conversations/(\w+)/messages", self.path):
             history = db.load_turns(m[1])
             if history is None:
@@ -168,12 +209,26 @@ class Handler(BaseHTTPRequestHandler):
             req = self._read_json()
             selected = sources.resolve(req["sources"])
             scopes = sources.resolve_scopes(selected, req.get("scopes") or {})
-            return self._stream_turn(m[1], history, req["content"], selected, scopes, is_new=False)
+            start = req.get("from_turn")
+            if start is not None:
+                if not (isinstance(start, int) and 0 <= start < len(history) and history[start]["role"] == "user"):
+                    raise InputError("やり直す質問の位置が正しくありません")
+                history = history[:start]
+            return self._stream_turn(
+                m[1], history, req["content"], selected, scopes, is_new=False, replace_from=start, clarify=not req.get("skip_clarify")
+            )
         if self.path == "/api/check":
             return self._send_json(200, check())
         if m := re.fullmatch(r"/api/turns/(\w+)/cancel", self.path):
             if cancel := RUNNING.get(m[1]):
                 cancel.set()
+            return self._send_json(200, {})
+        self.send_error(404)
+
+    def _patch(self):
+        if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
+            if not db.update_conversation(m[1], **conversation_changes(self._read_json())):
+                return self._send_json(404, {"error": "not found"})
             return self._send_json(200, {})
         self.send_error(404)
 
@@ -205,6 +260,8 @@ class Handler(BaseHTTPRequestHandler):
         selected: list[sources.Source],
         scopes: dict[str, list[str]],
         is_new: bool,
+        replace_from: int | None = None,
+        clarify: bool = True,
     ):
         """調査を別スレッドで走らせ、キューに溜まったイベントを1行ずつ書き出す。
 
@@ -222,9 +279,13 @@ class Handler(BaseHTTPRequestHandler):
 
         def work():
             try:
-                turn = agent.run_turn(history, question, selected, emit, scopes)
+                turn = agent.run_turn(history, question, selected, emit, scopes, clarify)
                 turn["trace_id"] = db.save_trace(conv_id, turn.pop("trace"))
-                db.append_turns(conv_id, [{"role": "user", "content": question}, turn])
+                new_turns = [{"role": "user", "content": question}, turn]
+                if replace_from is None:
+                    db.append_turns(conv_id, new_turns)
+                else:
+                    db.replace_turns(conv_id, replace_from, new_turns)
                 events.put({"type": "done", "conversation_id": conv_id, "turn": turn})
             except agent.Cancelled:
                 if is_new:
