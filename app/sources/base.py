@@ -15,3 +15,7 @@ class Source:
     requires: str = ""
     # 接続確認。軽いAPIを1回呼んで、誰としてつながったかを返す。失敗したら例外を投げる
     check: Callable[[], str] | None = None
+    # 質問ごとに選べる検索範囲（リポジトリやチャンネルの名前の一覧）を返す。選べないソースは None
+    scopes: Callable[[], list[str]] | None = None
+    # 検索範囲の呼び名（「リポジトリ」など）
+    scope_label: str = ""

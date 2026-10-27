@@ -3,7 +3,7 @@ import unittest
 from unittest import mock
 
 from app import sources
-from app.sources import github
+from app.sources import github, scope
 from app.sources.http import ApiError
 from tests.fake_api import FakeApi
 
@@ -63,6 +63,18 @@ class GitHubTest(unittest.TestCase):
         self.serve({"/search/issues": (422, {"message": "Validation Failed"})})
         with self.assertRaisesRegex(ApiError, "HTTP 422.*Validation Failed"):
             github.search_github.invoke({"query": "x"})
+
+    def test_selected_repos_replace_env_scope(self):
+        api = self.serve({"/search/issues": {"items": []}})
+        scope.set(["me/infra", "me/tools"])
+        self.addCleanup(scope.set, None)
+        github.search_github.invoke({"query": "VPN"})
+        self.assertEqual(api.requests[0]["params"]["q"], "VPN repo:me/infra repo:me/tools")
+
+    def test_scopes(self):
+        api = self.serve({"/user/repos": [{"full_name": "me/infra"}, {"full_name": "org/app"}]})
+        self.assertEqual(github.scopes(), ["me/infra", "org/app"])
+        self.assertEqual(api.requests[0]["params"]["sort"], "pushed")
 
     def test_check(self):
         self.serve({"/user": {"login": "sion"}})

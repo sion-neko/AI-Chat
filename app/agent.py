@@ -26,6 +26,7 @@ from langgraph.prebuilt.tool_node import ToolInvocationError
 
 from app import characters, links
 from app.sources import Source
+from app.sources import scope as search_scope
 from app.sources.http import ApiError
 
 Emit = Callable[[dict], None]
@@ -118,13 +119,23 @@ def _tool_loop(system_prompt: str, tools: list[BaseTool], trace: Trace, who: str
     return graph.compile()
 
 
-def run_member(source: Source, questions: list[str], emit: Emit, trace: Trace, followup: dict | None = None) -> dict:
+def run_member(
+    source: Source,
+    questions: list[str],
+    emit: Emit,
+    trace: Trace,
+    scope: list[str] | None = None,
+    followup: dict | None = None,
+) -> dict:
     """所員1人に調査させ、報告を返す。失敗しても例外は投げず、error に入れて返す。
 
+    scope は画面で選んだ検索範囲（リポジトリやチャンネル）。None なら絞らない。
     followup は所長からの再調査の依頼 {"instruction": 依頼, "previous": 前回の報告}。
     """
     character = characters.member(source.id, source.label)
     report = {"source": source.id, "label": source.label, "agent": character.name, "content": "", "steps": [], "error": None}
+    if scope:
+        report["scope"] = scope
     if followup:
         report["request"] = followup["instruction"]
     emit({"type": "member_start", "source": source.id, "agent": character.name})
@@ -134,9 +145,13 @@ def run_member(source: Source, questions: list[str], emit: Emit, trace: Trace, f
     request = f"今回の質問: {current}"
     if earlier:
         request = "これまでの質問:\n" + "\n".join(f"- {q}" for q in earlier) + f"\n\n{request}"
+    if scope:
+        request += f"\n\n検索範囲（{source.scope_label}）は次に絞られています: {', '.join(scope)}"
     if followup:
         request += f"\n\n## あなたの前回の報告\n{followup['previous']}\n\n## 所長からの再調査の依頼\n{followup['instruction']}"
 
+    # このスレッドで動く検索ツールに、範囲を渡す
+    search_scope.set(scope)
     started = time.monotonic()
     called_at = {}  # ツール呼び出しID → 呼んだ時刻（結果が返るまでの時間を測る）
     try:
@@ -240,7 +255,7 @@ def run_director(
             source = by_id[call["args"]["source"]]
             emit({"type": "followup", "source": source.id, "agent": latest[source.id]["agent"], "instruction": call["args"]["instruction"]})
             previous = _report_text(latest[source.id])
-            return run_member(source, questions, emit, trace, {"instruction": call["args"]["instruction"], "previous": previous})
+            return run_member(source, questions, emit, trace, latest[source.id].get("scope"), {"instruction": call["args"]["instruction"], "previous": previous})
 
         with ThreadPoolExecutor(max_workers=len(calls) or 1) as pool:
             results = dict(zip((c["id"] for c in calls), pool.map(follow, calls)))
@@ -268,8 +283,16 @@ def check_llm() -> dict:
     return {"state": "ok", "message": f"{model} が応答しました"}
 
 
-def run_turn(history: list[dict], question: str, sources: list[Source], emit: Emit) -> dict:
+def run_turn(
+    history: list[dict],
+    question: str,
+    sources: list[Source],
+    emit: Emit,
+    scopes: dict[str, list[str]] | None = None,
+) -> dict:
     """1ターン分の調査と回答。返り値は保存・表示用の assistant ターン。
+
+    scopes はソースIDごとの検索範囲。書かれていないソースは絞らない。
 
     trace（LLMとのやりとり）は大きいので、保存する側が会話とは分けて保存する。
     """
@@ -277,7 +300,7 @@ def run_turn(history: list[dict], question: str, sources: list[Source], emit: Em
     trace = Trace()
     questions = [t["content"] for t in history if t["role"] == "user"] + [question]
     with ThreadPoolExecutor(max_workers=len(sources)) as pool:
-        reports = list(pool.map(lambda s: run_member(s, questions, emit, trace), sources))
+        reports = list(pool.map(lambda s: run_member(s, questions, emit, trace, (scopes or {}).get(s.id)), sources))
 
     director = characters.director()
     emit({"type": "director_start", "agent": director.name})

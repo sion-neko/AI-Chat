@@ -10,7 +10,7 @@ import os
 
 from langchain_core.tools import tool
 
-from app.sources import http
+from app.sources import http, scope
 from app.sources.base import Source
 
 API_URL = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
@@ -49,7 +49,9 @@ def search_github(query: str, since: str | None = None, until: str | None = None
     state: "open" か "closed"。省略すると両方
     新しく更新された順に最大20件。本文は先頭だけなので、詳しくは get_github_issue で読む。
     """
-    terms = [query, os.environ.get("GITHUB_SCOPE", "")]
+    # 画面で選んだリポジトリがあれば、.env の GITHUB_SCOPE の代わりにそれで絞る
+    repos = scope.get()
+    terms = [query, " ".join(f"repo:{r}" for r in repos) if repos else os.environ.get("GITHUB_SCOPE", "")]
     if updated := _date_range(since, until):
         terms.append(f"updated:{updated}")
     if state:
@@ -108,6 +110,11 @@ def check() -> str:
     return f"{_get('/user')['login']} としてつながりました"
 
 
+def scopes() -> list[str]:
+    """トークンで見られるリポジトリ（最近更新された順に100件）。"""
+    return [r["full_name"] for r in _get("/user/repos", {"sort": "pushed", "per_page": 100})]
+
+
 GITHUB = Source(
     id="github",
     label="GitHub",
@@ -115,4 +122,6 @@ GITHUB = Source(
     configured=bool(os.environ.get("GITHUB_TOKEN")),
     requires="GITHUB_TOKEN",
     check=check,
+    scopes=scopes,
+    scope_label="リポジトリ",
 )

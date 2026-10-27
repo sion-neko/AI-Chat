@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest import mock
 
-from app.sources import gitlab
+from app.sources import gitlab, scope
 from tests.fake_api import FakeApi
 
 
@@ -51,6 +51,25 @@ class GitLabTest(unittest.TestCase):
         # merged は Merge Request だけなので Issue は検索しない
         self.assertEqual([r["path"] for r in api.requests], ["/api/v4/groups/infra%2Ftools/merge_requests"])
         self.assertNotIn("scope", api.requests[0]["params"])
+
+    def test_selected_projects(self):
+        api = self.serve({
+            "/api/v4/projects/infra%2Ftools/issues": [ISSUE],
+            "/api/v4/projects/infra%2Ftools/merge_requests": [],
+            "/api/v4/projects/infra%2Fweb/issues": [],
+            "/api/v4/projects/infra%2Fweb/merge_requests": [MR],
+        }, GITLAB_GROUP="ignored")
+        scope.set(["infra/tools", "infra/web"])
+        self.addCleanup(scope.set, None)
+        results = gitlab.search_gitlab.invoke({"query": "VPN"})
+        self.assertEqual([r["ref"] for r in results], ["infra/tools!4", "infra/tools#3"])
+        self.assertEqual(len(api.requests), 4)
+        self.assertNotIn("scope", api.requests[0]["params"])
+
+    def test_scopes(self):
+        api = self.serve({"/api/v4/projects": [{"path_with_namespace": "infra/tools"}]})
+        self.assertEqual(gitlab.scopes(), ["infra/tools"])
+        self.assertEqual(api.requests[0]["params"]["membership"], "true")
 
     def test_get_item_with_notes(self):
         notes = [{"author": {"username": "sato"}, "created_at": "2026-10-09T00:00:00Z", "system": True, "body": "merged"}]

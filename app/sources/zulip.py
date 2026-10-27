@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 from langchain_core.tools import tool
 
-from app.sources import http
+from app.sources import http, scope
 from app.sources.base import Source
 
 # 古いセルフホスト版でも動くよう、チャンネルは "stream" と書く（新しい版でも通る）
@@ -80,14 +80,23 @@ def search_zulip(query: str, since: str | None = None, until: str | None = None,
 
     query: 検索語。空白区切りはAND。"..." で囲むとフレーズ検索
     since, until: 投稿日の範囲（YYYY-MM-DD）。省略可
-    channel: チャンネル名で絞る。省略可
+    channel: チャンネル名で絞る。省略可（検索範囲が決められているときは、その中のチャンネルだけ）
     新しい順に最大20件。話の続きは get_zulip_topic でトピックごと読む。
     """
-    narrow = [{"operator": "search", "operand": query}]
-    if channel:
-        narrow.append({"operator": "stream", "operand": channel})
+    # 画面でチャンネルを選んでいれば、その中だけを探す（Zulipの narrow はチャンネルを1つしか指定できないので、1つずつ）
+    allowed = scope.get()
+    if channel and allowed and channel not in allowed:
+        raise http.ApiError(f"チャンネル {channel} は今回の検索範囲の外です。範囲: {', '.join(allowed)}")
+    channels = [channel] if channel else allowed or [None]
+    found = []
+    for c in channels:
+        narrow = [{"operator": "search", "operand": query}]
+        if c:
+            narrow.append({"operator": "stream", "operand": c})
+        found += _messages(narrow, FETCH_LIMIT)
+    found.sort(key=lambda m: m["timestamp"])
     results = []
-    for msg in reversed(_messages(narrow, FETCH_LIMIT)):
+    for msg in reversed(found):
         day = datetime.fromtimestamp(msg["timestamp"], timezone.utc).date().isoformat()
         if (since and day < since) or (until and day > until):
             continue
@@ -112,6 +121,11 @@ def check() -> str:
     return f"{_get('/users/me', {})['full_name']} としてつながりました"
 
 
+def scopes() -> list[str]:
+    """自分が参加しているチャンネル。"""
+    return sorted(s["name"] for s in _get("/users/me/subscriptions", {})["subscriptions"])
+
+
 ZULIP = Source(
     id="zulip",
     label="Zulip",
@@ -119,4 +133,6 @@ ZULIP = Source(
     configured=all(os.environ.get(k) for k in ("ZULIP_URL", "ZULIP_EMAIL", "ZULIP_API_KEY")),
     requires="ZULIP_URL, ZULIP_EMAIL, ZULIP_API_KEY",
     check=check,
+    scopes=scopes,
+    scope_label="チャンネル",
 )

@@ -20,6 +20,9 @@ const traceDialog = document.getElementById("trace");
 
 // 外したソースはブラウザに覚えておく（新しく使えるようになったソースは選んだ状態で出す）
 const UNCHECKED_KEY = "unchecked-sources";
+// ソースごとに選んだ検索範囲 {ソースID: [名前]}。これもブラウザに覚えておく。ないソースは絞らない
+const SCOPES_KEY = "source-scopes";
+let selectedScopes = loadJson(SCOPES_KEY, {});
 
 // 最初の画面に出す質問の例
 const EXAMPLES = [
@@ -102,7 +105,7 @@ form.addEventListener("submit", async (e) => {
   try {
     const path = currentId ? `/api/conversations/${currentId}/messages` : "/api/conversations";
     let result = null;
-    await streamTurn(path, { content, sources: selectedSources() }, (event) => {
+    await streamTurn(path, { content, sources: selectedSources(), scopes: selectedScopes }, (event) => {
       if (event.type === "error") throw new Error(event.message);
       if (event.type === "start") running.turnId = event.turn_id;
       else if (event.type === "done" || event.type === "cancelled") result = event;
@@ -162,9 +165,10 @@ async function loadConfig() {
 }
 
 function renderSources(sources) {
-  const unchecked = loadUnchecked();
+  const unchecked = new Set(loadJson(UNCHECKED_KEY, []));
   sourceBox.replaceChildren(
     ...sources.map((s) => {
+      const item = el("div", "source-item");
       const label = el("label", "source");
       label.title = `${s.agent}が調べます`;
       const box = el("input");
@@ -174,27 +178,100 @@ function renderSources(sources) {
       const chip = el("span", "", s.label);
       chip.append(el("small", "", s.agent));
       label.append(box, chip);
-      return label;
+      item.append(label);
+      if (s.scope_label) item.append(scopeButton(s));
+      return item;
     }),
   );
 }
 
-function loadUnchecked() {
+// 範囲を選べるソースのチップの横に出すボタン。今の選択を短く出す
+function scopeButton(source) {
+  const button = el("button", "scope-button");
+  button.type = "button";
+  const names = selectedScopes[source.id] ?? [];
+  button.textContent = names.length ? (names.length === 1 ? names[0] : `${names[0]} ほか${names.length - 1}件`) : `すべての${source.scope_label}`;
+  button.title = `${source.label}で調べる${source.scope_label}を選ぶ`;
+  button.classList.toggle("narrowed", names.length > 0);
+  button.addEventListener("click", () => openScope(source, button));
+  return button;
+}
+
+function loadJson(key, fallback) {
   try {
-    return new Set(JSON.parse(localStorage.getItem(UNCHECKED_KEY)) || []);
+    return JSON.parse(localStorage.getItem(key)) ?? fallback;
   } catch {
-    return new Set();
+    return fallback;
   }
 }
 
-function saveSourceSelection() {
-  const unchecked = [...sourceBox.querySelectorAll("input:not(:checked)")].map((box) => box.value);
+// 保存できない環境では、開き直すたびに既定（すべて選ぶ・絞らない）に戻るだけ
+function saveJson(key, value) {
   try {
-    localStorage.setItem(UNCHECKED_KEY, JSON.stringify(unchecked));
-  } catch {
-    // 保存できない環境では、毎回すべて選んだ状態になるだけ
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
+}
+
+function saveSourceSelection() {
+  saveJson(UNCHECKED_KEY, [...sourceBox.querySelectorAll("input:not(:checked)")].map((box) => box.value));
+}
+
+// ---- 検索範囲の選択 ----
+
+const scopeDialog = document.getElementById("scope");
+const scopeList = document.getElementById("scope-list");
+const scopeFilter = document.getElementById("scope-filter");
+// 開いている範囲の選択 { source, button, choices, checked: Set }
+let scopeEditing = null;
+
+async function openScope(source, button) {
+  scopeEditing = { source, button, choices: [], checked: new Set(selectedScopes[source.id] ?? []) };
+  document.getElementById("scope-title").textContent = `${source.label}で調べる${source.scope_label}`;
+  document.getElementById("scope-note").textContent = `選んだ${source.scope_label}だけを${source.agent}が調べます。何も選ばなければ、すべてを調べます。`;
+  scopeFilter.value = "";
+  scopeList.replaceChildren(el("div", "conv-empty", "読み込んでいます…"));
+  scopeDialog.showModal();
+  try {
+    const choices = await api("GET", `/api/sources/${source.id}/scopes`);
+    // 以前選んだのに一覧から消えたものも、外せるように出しておく
+    scopeEditing.choices = [...new Set([...scopeEditing.checked, ...choices])];
+    renderScopeList();
+  } catch (err) {
+    scopeList.replaceChildren(el("div", "error-text", `一覧を取れませんでした: ${err.message}`));
   }
 }
+
+function renderScopeList() {
+  const query = scopeFilter.value.trim().toLowerCase();
+  const shown = scopeEditing.choices.filter((name) => name.toLowerCase().includes(query));
+  scopeList.replaceChildren(
+    ...shown.map((name) => {
+      const label = el("label", "scope-choice");
+      const box = el("input");
+      box.type = "checkbox";
+      box.checked = scopeEditing.checked.has(name);
+      box.addEventListener("change", () => (box.checked ? scopeEditing.checked.add(name) : scopeEditing.checked.delete(name)));
+      label.append(box, name);
+      return label;
+    }),
+  );
+  if (!shown.length) scopeList.append(el("div", "conv-empty", "見つかりませんでした"));
+}
+
+scopeFilter.addEventListener("input", renderScopeList);
+document.getElementById("close-scope").addEventListener("click", () => scopeDialog.close());
+document.getElementById("scope-clear").addEventListener("click", () => {
+  scopeEditing.checked.clear();
+  renderScopeList();
+});
+document.getElementById("scope-done").addEventListener("click", () => {
+  const { source, button, checked } = scopeEditing;
+  if (checked.size) selectedScopes[source.id] = [...checked];
+  else delete selectedScopes[source.id];
+  saveJson(SCOPES_KEY, selectedScopes);
+  button.replaceWith(scopeButton(source));
+  scopeDialog.close();
+});
 
 function selectedSources() {
   return [...sourceBox.querySelectorAll("input:checked")].map((box) => box.value);
@@ -487,7 +564,7 @@ function membersView(rows) {
 }
 
 // 調査中の所員の1行。set で状態を変える
-function memberRow(agent, label, request) {
+function memberRow(agent, label, request, scope) {
   const node = el("div", "member");
   const pill = el("span", "pill");
   const note = el("span", "member-note");
@@ -495,6 +572,7 @@ function memberRow(agent, label, request) {
   head.append(el("span", "member-name", agent), el("span", "member-source", label), pill, note);
   node.append(head);
   if (request) node.append(el("div", "member-request", `所長からの依頼: ${request}`));
+  if (scope) node.append(el("div", "member-request", `調べた範囲: ${scope.join(", ")}`));
   const set = (state, label, text) => {
     pill.className = `pill ${state}`;
     pill.textContent = label;
@@ -505,7 +583,7 @@ function memberRow(agent, label, request) {
 
 // 終わった調査の所員の1行。検索の過程と報告はたたんでおく
 function memberView(report) {
-  const row = memberRow(report.agent, report.label, report.request);
+  const row = memberRow(report.agent, report.label, report.request, report.scope);
   if (report.error) {
     row.set("failed", "失敗", "");
     row.node.append(el("div", "member-report error-text", report.error));

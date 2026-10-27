@@ -61,6 +61,20 @@
     </div>
   </dialog>
 
+  <dialog id="scope">
+    <div class="dialog-head">
+      <h2 id="scope-title">調べる範囲</h2>
+      <button id="close-scope" class="close" type="button" title="閉じる">×</button>
+    </div>
+    <p id="scope-note" class="dialog-note"></p>
+    <input id="scope-filter" class="search" type="search" placeholder="名前で絞り込む">
+    <div id="scope-list" class="scope-list"></div>
+    <div class="dialog-actions">
+      <button id="scope-clear" class="quiet" type="button">選択を外す（すべて調べる）</button>
+      <button id="scope-done" class="primary" type="button">決定</button>
+    </div>
+  </dialog>
+
   <dialog id="trace" class="wide">
     <div class="dialog-head">
       <h2>LLMとのやりとり</h2>

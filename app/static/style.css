@@ -578,3 +578,51 @@ dialog.wide { width: min(900px, calc(100vw - 32px)); }
 .call-message.response { border-top: 1px dashed var(--line); }
 
 .call-message.response pre { background: var(--accent-soft); }
+
+/* 検索範囲 */
+
+.source-item { display: inline-flex; align-items: center; gap: 2px; }
+
+.scope-button {
+  max-width: 220px;
+  padding: 0 8px;
+  border: none;
+  background: none;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.scope-button::after { content: " ▾"; }
+
+.scope-button:hover { color: var(--accent); }
+
+.scope-button.narrowed { color: var(--accent); font-weight: bold; }
+
+#scope .search { margin-bottom: 8px; }
+
+.scope-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.scope-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--line);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.scope-list > .scope-choice:first-child { border-top: none; }
+
+.scope-choice:hover { background: var(--shelf); }
