@@ -1020,10 +1020,41 @@ async function openConversation(id) {
   if (job) showJob(job);
   showFollowupOnLast();
   log.scrollTop = log.scrollHeight;
+  // 検索して開いたときは、見つかった言葉に印を付けて最初の場所を見せる
+  markSearchWords();
   setPlaceholder(data.turns.at(-1));
   highlightCurrent();
   setSendButton();
   if (!document.hidden && (openedConversation?.unread || arrivals.has(id))) markRead(id);
+}
+
+function markSearchWords() {
+  const words = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return;
+  const walker = document.createTreeWalker(log, NodeFilter.SHOW_TEXT);
+  const hits = [];
+  for (let node; (node = walker.nextNode()); ) {
+    // たたんだ調査の記録の中までは印を付けない（開かないと見えないので）
+    if (node.parentElement.closest("details:not([open]), button, mark")) continue;
+    if (words.some((w) => node.data.toLowerCase().includes(w))) hits.push(node);
+  }
+  for (const node of hits) {
+    const text = node.data;
+    const lower = text.toLowerCase();
+    const parts = [];
+    let at = 0;
+    while (at < text.length) {
+      // いちばん手前に出てくる言葉から印を付ける
+      const next = words.map((w) => [lower.indexOf(w, at), w]).filter(([i]) => i >= 0).sort((a, b) => a[0] - b[0])[0];
+      if (!next) break;
+      const [i, w] = next;
+      parts.push(text.slice(at, i), el("mark", "search-hit", text.slice(i, i + w.length)));
+      at = i + w.length;
+    }
+    parts.push(text.slice(at));
+    node.replaceWith(...parts);
+  }
+  log.querySelector("mark.search-hit")?.scrollIntoView({ block: "center" });
 }
 
 async function deleteConversation(id) {

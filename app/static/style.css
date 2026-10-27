@@ -1061,3 +1061,6 @@ dialog.wide { width: min(900px, calc(100vw - 32px)); }
 
 /* 調べる場所を全部外したとき（相談） */
 .consult-hint { font-size: var(--text-xs); color: var(--accent); white-space: nowrap; cursor: help; }
+
+/* 検索して開いたときの、見つかった言葉 */
+mark.search-hit { color: inherit; background: var(--busy-soft); box-shadow: 0 0 0 1px var(--busy); border-radius: 2px; }
