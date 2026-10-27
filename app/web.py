@@ -8,7 +8,8 @@ API:
   POST   /api/conversations               {content, sources} 新しい会話を作って最初の質問をする
   GET    /api/conversations/{id}          会話の中身（ターン単位）
   GET    /api/traces/{trace_id}           1ターン分のLLMとのやりとり
-  POST   /api/conversations/{id}/messages {content, sources} 続きの質問をする
+  POST   /api/conversations/{id}/messages {content, sources, from_turn?} 続きの質問をする
+                                          from_turn（質問のターンの位置）があれば、そこから後を消して質問し直す（成功したときだけ置き換える）
   DELETE /api/conversations/{id}
   POST   /api/turns/{turn_id}/cancel        調査中のターンを中止する（turn_id は start イベントで届く）
   GET    /api/characters                  所長と所員（使えるソースの分）
@@ -206,7 +207,12 @@ class Handler(BaseHTTPRequestHandler):
             req = self._read_json()
             selected = sources.resolve(req["sources"])
             scopes = sources.resolve_scopes(selected, req.get("scopes") or {})
-            return self._stream_turn(m[1], history, req["content"], selected, scopes, is_new=False)
+            start = req.get("from_turn")
+            if start is not None:
+                if not (isinstance(start, int) and 0 <= start < len(history) and history[start]["role"] == "user"):
+                    raise InputError("やり直す質問の位置が正しくありません")
+                history = history[:start]
+            return self._stream_turn(m[1], history, req["content"], selected, scopes, is_new=False, replace_from=start)
         if self.path == "/api/check":
             return self._send_json(200, check())
         if m := re.fullmatch(r"/api/turns/(\w+)/cancel", self.path):
@@ -250,6 +256,7 @@ class Handler(BaseHTTPRequestHandler):
         selected: list[sources.Source],
         scopes: dict[str, list[str]],
         is_new: bool,
+        replace_from: int | None = None,
     ):
         """調査を別スレッドで走らせ、キューに溜まったイベントを1行ずつ書き出す。
 
@@ -269,7 +276,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 turn = agent.run_turn(history, question, selected, emit, scopes)
                 turn["trace_id"] = db.save_trace(conv_id, turn.pop("trace"))
-                db.append_turns(conv_id, [{"role": "user", "content": question}, turn])
+                new_turns = [{"role": "user", "content": question}, turn]
+                if replace_from is None:
+                    db.append_turns(conv_id, new_turns)
+                else:
+                    db.replace_turns(conv_id, replace_from, new_turns)
                 events.put({"type": "done", "conversation_id": conv_id, "turn": turn})
             except agent.Cancelled:
                 if is_new:

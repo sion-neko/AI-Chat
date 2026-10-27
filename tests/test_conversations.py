@@ -52,6 +52,13 @@ class ConversationsTest(unittest.TestCase):
         db.init()
         self.assertEqual(db.list_conversations(), [{"id": "a", "title": "古い会話", "updated_at": "x", "archived": False, "tags": []}])
 
+    def test_replace_turns(self):
+        db.append_turns(self.disk, [{"role": "user", "content": "その後は？"}, {"role": "assistant", "content": "古い回答", "trace_id": db.save_trace(self.disk, [{"who": "x"}])}])
+        old_trace = db.load_turns(self.disk)[3]["trace_id"]
+        db.replace_turns(self.disk, 2, [{"role": "user", "content": "その後どうなった？"}, {"role": "assistant", "content": "新しい回答"}])
+        self.assertEqual([t["content"] for t in db.load_turns(self.disk)], ["ディスク増設どうなった？", "NASを入れ替えました 100%_done", "その後どうなった？", "新しい回答"])
+        self.assertIsNone(db.load_trace(old_trace))
+
     def test_validation(self):
         self.assertEqual(web.conversation_changes({"tags": [" 監視 ", "tag:監視", "", "NAS"]}), {"tags": ["監視", "NAS"]})
         for bad in ({"title": "  "}, {"tags": "監視"}, {"tags": ["a b"]}, {"tags": ["あ" * 21]}, {"tags": [str(i) for i in range(11)]}):

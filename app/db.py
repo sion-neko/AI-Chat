@@ -153,6 +153,22 @@ def append_turns(conv_id: str, turns: list[dict]):
         conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (_now(), conv_id))
 
 
+def replace_turns(conv_id: str, start: int, turns: list[dict]):
+    """start 番目（0始まり）以降のターンを消して turns に置き換える。消したターンのLLMの記録も消す。"""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id, data FROM turns WHERE conversation_id = ? ORDER BY id LIMIT -1 OFFSET ?", (conv_id, start)
+        ).fetchall()
+        trace_ids = [json.loads(r["data"]).get("trace_id") for r in rows]
+        conn.executemany("DELETE FROM traces WHERE id = ?", [(t,) for t in trace_ids if t])
+        conn.executemany("DELETE FROM turns WHERE id = ?", [(r["id"],) for r in rows])
+        conn.executemany(
+            "INSERT INTO turns (conversation_id, data) VALUES (?, ?)",
+            [(conv_id, json.dumps(t, ensure_ascii=False)) for t in turns],
+        )
+        conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (_now(), conv_id))
+
+
 def save_trace(conv_id: str, calls: list[dict]) -> str:
     trace_id = uuid.uuid4().hex
     with connect() as conn:

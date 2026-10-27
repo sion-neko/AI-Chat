@@ -6,6 +6,8 @@ let conversations = [];
 let showingArchive = false;
 // 開いている会話。検索で一覧から外れても、名前やタグを出せるように持っておく
 let openedConversation = null;
+// 開いている会話に保存されているターンの数（次の質問の位置）
+let turnCount = 0;
 // 所長の名前（回答の見出しに使う）と、ソースIDから画面の名前への対応
 let directorName = "所長";
 let sourceLabels = new Map();
@@ -109,19 +111,28 @@ input.addEventListener("keydown", (e) => {
 // 調査中のターン。調査中は送信ボタンが中止ボタンになる
 let running = null; // { turnId, cancelling }
 
-form.addEventListener("submit", async (e) => {
+form.addEventListener("submit", (e) => {
   e.preventDefault();
   if (running) return cancelTurn();
   const content = input.value.trim();
   if (!content) return;
+  input.value = "";
+  autosize();
+  ask(content, null);
+});
 
+// 質問して調査させる。fromTurn（質問のターンの位置）があれば、そこから後をやり直す
+async function ask(content, fromTurn) {
   if (document.getElementById("empty")) {
     log.replaceChildren();
     renderHead({ title: content, tags: [] });
   }
-  const turn = append(turnView(content));
-  input.value = "";
-  autosize();
+  if (fromTurn !== null) {
+    // やり直す質問と、それより後のやりとりを画面から外す（失敗したら開き直して元に戻す）
+    for (const node of [...log.querySelectorAll(".turn")].filter((n) => Number(n.dataset.index) >= fromTurn)) node.remove();
+  }
+  const index = fromTurn ?? turnCount;
+  const turn = append(turnView(content, index));
 
   const progress = progressView();
   turn.append(progress.node);
@@ -129,8 +140,10 @@ form.addEventListener("submit", async (e) => {
   setSendButton();
   try {
     const path = currentId ? `/api/conversations/${currentId}/messages` : "/api/conversations";
+    const body = { content, sources: selectedSources(), scopes: selectedScopes };
+    if (fromTurn !== null) body.from_turn = fromTurn;
     let result = null;
-    await streamTurn(path, { content, sources: selectedSources(), scopes: selectedScopes }, (event) => {
+    await streamTurn(path, body, (event) => {
       if (event.type === "error") throw new Error(event.message);
       if (event.type === "start") running.turnId = event.turn_id;
       else if (event.type === "done" || event.type === "cancelled") result = event;
@@ -141,10 +154,12 @@ form.addEventListener("submit", async (e) => {
       // 何も保存されていないので、質問ごと消して入力欄に戻す
       turn.remove();
       restoreQuestion(content);
-      if (!log.children.length) showEmpty();
+      if (fromTurn !== null) await openConversation(currentId);
+      else if (!log.children.length) showEmpty();
       return;
     }
-    progress.node.replaceWith(answerView(result.turn));
+    progress.node.replaceWith(answerView(result.turn, index));
+    turnCount = index + 2;
     if (!currentId) {
       currentId = result.conversation_id;
       await refreshList();
@@ -158,7 +173,7 @@ form.addEventListener("submit", async (e) => {
     setSendButton();
     input.focus();
   }
-});
+}
 
 async function cancelTurn() {
   if (!running.turnId || running.cancelling) return;
@@ -383,10 +398,11 @@ async function openConversation(id) {
   openedConversation = conversations.find((c) => c.id === id) ?? null;
   renderHead();
   const nodes = [];
-  for (const t of data.turns) {
-    if (t.role === "user") nodes.push(turnView(t.content));
-    else nodes.at(-1).append(answerView(t));
-  }
+  data.turns.forEach((t, i) => {
+    if (t.role === "user") nodes.push(turnView(t.content, i));
+    else nodes.at(-1).append(answerView(t, i - 1));
+  });
+  turnCount = data.turns.length;
   log.replaceChildren(...nodes);
   log.scrollTop = log.scrollHeight;
   highlightCurrent();
@@ -559,10 +575,62 @@ function highlightCurrent() {
 // ---- 調査と回答 ----
 
 // 1往復分の入れ物。質問を出し、回答はあとから足す
-function turnView(question) {
+// index は質問のターンの位置。やり直すときにサーバーへ渡す
+function turnView(question, index) {
   const node = el("section", "turn");
-  node.append(el("div", "question", question));
+  node.dataset.index = index;
+  const bubble = el("div", "question", question);
+  const edit = el("button", "question-edit", "編集");
+  edit.type = "button";
+  edit.title = "質問を直して調べ直す";
+  edit.addEventListener("click", () => editQuestion(node, question, index));
+  const row = el("div", "question-row");
+  row.append(edit, bubble);
+  node.append(row);
   return node;
+}
+
+// より後のやりとりが消えるときは確かめる
+function confirmRedo(index) {
+  if (index + 2 >= turnCount) return true;
+  return confirm("この質問より後のやりとりは消えます。調べ直しますか？");
+}
+
+function redo(content, index) {
+  if (running || !confirmRedo(index)) return;
+  ask(content, index);
+}
+
+function editQuestion(node, question, index) {
+  if (running) return;
+  const row = node.querySelector(".question-row");
+  const editor = el("div", "question-editor");
+  const field = el("textarea");
+  field.value = question;
+  field.rows = Math.min(8, question.split("\n").length + 1);
+  const cancel = el("button", "quiet", "やめる");
+  cancel.type = "button";
+  const submit = el("button", "primary", "調べ直す");
+  submit.type = "button";
+  const actions = el("div", "dialog-actions");
+  actions.append(cancel, submit);
+  editor.append(field, actions);
+  row.replaceWith(editor);
+  field.focus();
+  cancel.addEventListener("click", () => editor.replaceWith(row));
+  submit.addEventListener("click", () => {
+    const content = field.value.trim();
+    if (!content) return;
+    if (running || !confirmRedo(index)) return;
+    ask(content, index);
+  });
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      submit.click();
+    }
+    if (e.key === "Escape") cancel.click();
+  });
 }
 
 // 所長の回答の枠（アイコン・名前・補足）。body に中身を足す
@@ -580,7 +648,7 @@ function answerFrame(agent) {
   return { node, body, meta };
 }
 
-function answerView({ agent, content, model, reports, links, seconds, llm_calls, trace_id }) {
+function answerView({ agent, content, model, reports, links, seconds, llm_calls, trace_id }, index) {
   const { node, body, meta } = answerFrame(agent);
   const searches = reports.reduce((n, r) => n + r.steps.length, 0);
   const members = new Set(reports.map((r) => r.source)).size;
@@ -598,6 +666,11 @@ function answerView({ agent, content, model, reports, links, seconds, llm_calls,
   const answer = markdownView(content);
   const actions = el("div", "answer-actions");
   actions.append(copyButton(content));
+  const regenerate = el("button", "", "作り直す");
+  regenerate.type = "button";
+  regenerate.title = "同じ質問でもう一度調べる";
+  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").querySelector(".question").textContent, index));
+  actions.append(regenerate);
   if (trace_id) {
     const button = el("button", "", `LLMとのやりとり（${llm_calls}回）`);
     button.type = "button";
@@ -874,6 +947,7 @@ function scrollToBottom() {
 
 function showEmpty() {
   openedConversation = null;
+  turnCount = 0;
   renderHead();
   const node = el("div", "empty");
   node.id = "empty";
