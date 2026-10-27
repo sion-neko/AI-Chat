@@ -2,55 +2,61 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>おばけ探偵事務所</title>
   <link rel="icon" href="/static/ghost.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <aside id="sidebar">
-    <button id="new-chat" type="button">＋ 新しい会話</button>
-    <nav id="conversations"></nav>
+  <aside class="sidebar">
+    <div class="brand">
+      <img src="/static/ghost.svg" alt="" class="brand-logo">
+      <div>
+        <div class="brand-name">おばけ探偵事務所</div>
+        <div class="brand-sub">横断調査AIチャット</div>
+      </div>
+    </div>
+    <button id="new-chat" class="new-chat" type="button">新しい調査</button>
+    <input id="search" class="search" type="search" placeholder="過去の調査を探す">
+    <nav id="conversations" class="conversations"></nav>
   </aside>
 
-  <div class="chat">
-    <header>
-      <button id="toggle-sidebar" class="icon-button" type="button" title="会話の一覧">☰</button>
-      <h1><img src="/static/ghost.svg" alt="" class="logo"><span class="title">おばけ探偵事務所</span></h1>
-      <span id="model" class="model-badge" title="設定中のモデル">…</span>
-      <button id="open-status" class="header-button" type="button">接続確認</button>
-      <button id="open-characters" type="button">キャラクター</button>
+  <div class="main">
+    <header class="topbar">
+      <h1 id="conversation-title" class="conversation-title">新しい調査</h1>
+      <span id="model" class="model" title="設定中のモデル">…</span>
+      <button id="open-status" class="quiet" type="button">接続確認</button>
+      <button id="open-characters" class="quiet" type="button">キャラクター</button>
     </header>
 
-    <main id="log"></main>
+    <main id="log" class="log"></main>
 
-    <fieldset id="sources" class="sources">
-      <legend>検索するソース</legend>
-    </fieldset>
-
-    <form id="form">
-      <textarea id="input" rows="1" placeholder="質問を入力（Shift+Enterで改行）"></textarea>
-      <button id="send" type="submit">送信</button>
+    <form id="form" class="composer">
+      <textarea id="input" rows="1" placeholder="聞きたいことを入力（Enterで送信 / Shift+Enterで改行）"></textarea>
+      <div class="composer-bar">
+        <span class="composer-label">調べる場所</span>
+        <div id="sources" class="sources"></div>
+        <button id="send" class="send" type="submit">調査を依頼</button>
+      </div>
     </form>
   </div>
 
   <dialog id="characters">
     <div class="dialog-head">
       <h2>キャラクター</h2>
-      <button id="close-characters" type="button" title="閉じる">×</button>
+      <button id="close-characters" class="close" type="button" title="閉じる">×</button>
     </div>
     <p class="dialog-note">所長と所員の名前と性格（口調や得意なこと）を変えられます。変更は次の質問から反映されます。</p>
-    <div id="character-list"></div>
+    <div id="character-list" class="character-list"></div>
   </dialog>
 
   <dialog id="status">
     <div class="dialog-head">
       <h2>接続確認</h2>
-      <button id="close-status" type="button" title="閉じる">×</button>
+      <button id="close-status" class="close" type="button" title="閉じる">×</button>
     </div>
     <p class="dialog-note">LLMと各ソースに実際につないで、設定が正しいか確かめます。設定は .env に書き、書き換えたらアプリを再起動します。</p>
     <table id="status-table" class="status-table"></table>
-    <div class="character-actions">
+    <div class="dialog-actions">
       <button id="run-check" class="primary" type="button">確認する</button>
     </div>
   </dialog>
