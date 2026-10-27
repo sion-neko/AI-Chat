@@ -8,6 +8,7 @@
              links: [{"url", "found"}] 回答のリンクが検索結果にあったか（app/links.py）
              seconds, llm_calls: かかった時間とLLMの呼び出し回数
              kind: "clarify" なら、調べる前に所長が聞き返したターン（content が質問。reports・links は持たない）
+                   "chat" なら、調べる場所を選ばずに所長がそのまま答えたターン（reports・links は持たない）
              memo_added: [{"scope", "note", "folder", "saved"}] 調査のあとに所長がメモに書き足した内容
              trace_id: LLMとのやりとりの記録（traces テーブル。プロンプトを丸ごと含み大きいので分けて持つ）
 """

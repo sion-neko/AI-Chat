@@ -120,6 +120,15 @@ DIRECTOR_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name
 - 報告では答えきれないとき（結末が分からない、報告どうしが食い違う、検索語や期間の見落としがありそう等）は、
   request_reinvestigation で所員に再調査を頼める。頼むのは本当に必要なときだけにし、何をどう調べ直すかを具体的に書く"""
 
+# 調べる場所を選ばずに頼まれたとき（相談）。所員は動かさず、所長がそのまま答える
+CHAT_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name}」です。{persona}
+今回は所員に調べさせず、依頼人の頼みにあなたが直接応えます。今日は {today} です。
+
+- 貼られた文章の要約・言い換え・翻訳・下書き・整理・相談などに、そのまま応える
+- 社内の出来事や経緯など、調べないと分からない事実は推測で答えない。
+  「調べる場所を選んで依頼すれば、所員が調べます」と伝える
+- 回答はMarkdownで書いてよい"""
+
 # 続報を調べるとき（「その後どうなった？」）に足す
 MEMBER_SINCE_NOTE = """
 
@@ -571,6 +580,28 @@ def make_title(questions: list[str], answer: str) -> str | None:
     return title[: TITLE_LENGTH * 2] or None
 
 
+def consult(
+    director: characters.Character, history: list[dict], asked: str, emit: Emit, trace: Trace, memo: str, extra: dict, started: float
+) -> dict:
+    """調べる場所を選ばずに頼まれたとき。所員は動かさず、所長がそのまま答える（聞き返しもメモへの書き足しもしない）。"""
+    emit({"type": "director_start", "agent": director.name})
+    prompt = CHAT_PROMPT.format(name=director.name, persona=director.persona, today=date.today()) + memo
+    messages = [SystemMessage(prompt), *_history_messages(history), HumanMessage(asked)]
+    answer = _stream(_llm, messages, emit, trace, f"{director.name}所長（相談）", [])
+    return {
+        "role": "assistant",
+        "kind": "chat",
+        "agent": director.name,
+        "date": date.today().isoformat(),
+        "content": answer.text,
+        "model": answer.response_metadata.get("model_name") or os.environ["LLM_MODEL"],
+        **extra,
+        "seconds": round(time.monotonic() - started, 2),
+        "llm_calls": len(trace.calls),
+        "trace": trace.calls,
+    }
+
+
 def member_questions(history: list[dict], question: str) -> list[str]:
     """所員に渡す、これまでの質問。所長が聞き返した後の答えには、その確認を添える。"""
     questions = []
@@ -615,6 +646,7 @@ def run_turn(
     直前に聞き返したばかりのときも、続けては聞き返さない。
     since（YYYY-MM-DD）があれば続報の調査（「その後どうなった？」）。その日より後の動きだけを調べ、聞き返さない。
     聞き返したときは kind: "clarify" のターンを返す（reports などは持たない）。
+    sources が空なら相談（consult）。調べずに所長が答え、kind: "chat" のターンを返す。
 
     trace（LLMとのやりとり）は大きいので、保存する側が会話とは分けて保存する。
     """
@@ -626,7 +658,7 @@ def run_turn(
     asked = user_text({"content": question, "image_text": image_text})
     extra = {"image_text": image_text} if image_text else {}
 
-    if clarify and not since and not (history and history[-1].get("kind") == "clarify"):
+    if sources and clarify and not since and not (history and history[-1].get("kind") == "clarify"):
         emit({"type": "intake_start", "agent": director.name})
         if ask := intake(director, history, asked, trace, memo):
             return {
@@ -641,6 +673,9 @@ def run_turn(
                 "llm_calls": len(trace.calls),
                 "trace": trace.calls,
             }
+
+    if not sources:
+        return consult(director, history, asked, emit, trace, memo, extra, started)
 
     questions = member_questions(history, asked)
     with ThreadPoolExecutor(max_workers=len(sources)) as pool:

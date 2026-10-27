@@ -113,6 +113,16 @@ class AgentTest(unittest.TestCase):
         self.assertIn("seconds", turn["reports"][0]["steps"][0])
         self.assertGreaterEqual(turn["seconds"], turn["reports"][0]["seconds"])
 
+    def test_consult_without_sources(self):
+        llm = FakeLLM([], ask="聞き返さないはず", notes=[{"scope": "global", "note": "書かないはず"}])
+        with mock.patch.object(agent, "_llm", llm):
+            turn = agent.run_turn([], "この文章を要約して", [], self.events.append, memos={"global": "結論から書く", "folder": None})
+        self.assertEqual((turn["kind"], turn["content"], turn["model"]), ("chat", "回答", "fake-1"))
+        self.assertNotIn("reports", turn)
+        self.assertEqual([c["who"] for c in turn["trace"]], ["シロ所長（相談）"])
+        self.assertIn("結論から書く", turn["trace"][0]["messages"][0]["content"])
+        self.assertEqual([e["type"] for e in self.events if e["type"] != "delta"], ["director_start"])
+
     def test_followup_runs_member_again_then_answers(self):
         llm = FakeLLM([{"source": "dummy_chat", "instruction": "10月に絞って"}, {"source": "nope", "instruction": "x"}])
         turn = self.run_turn(llm)

@@ -62,6 +62,7 @@ titleEl.addEventListener("click", renameConversation);
 sourceBox.addEventListener("change", () => {
   selection.unchecked = [...sourceBox.querySelectorAll("input:not(:checked)")].map((box) => box.value);
   saveSelection();
+  setSendButton();
 });
 
 document.getElementById("open-characters").addEventListener("click", async () => {
@@ -154,7 +155,8 @@ async function ask(content, fromTurn, skipClarify = false, images = [], shownIma
   const index = fromTurn ?? turnCount;
   // サーバーが受け付けるまでの仮の表示。受け付けたら調査の表示としてそのまま使う
   const turnNode = append(turnView(content, index, { images: shownImages, followup }));
-  const view = progressView();
+  const consult = !selectedSources().length;
+  const view = progressView(undefined, consult);
   turnNode.append(view.node);
   submitting = true;
   setSendButton();
@@ -168,7 +170,7 @@ async function ask(content, fromTurn, skipClarify = false, images = [], shownIma
     if (images.length) body.images = images;
     if (followup) body.followup = true;
     const { turn_id, conversation_id } = await api("POST", path, body);
-    const job = ensureJob(turn_id, conversation_id, { question: content, index, replace: fromTurn !== null, followup });
+    const job = ensureJob(turn_id, conversation_id, { question: content, index, replace: fromTurn !== null, followup, consult });
     job.mine = { content, images, shownImages };
     // 受け付けを待つ間に別の会話へ移っていたら、仮の表示は捨てる（戻ってきたときに描き直す）
     if (currentId === asked && turnNode.isConnected) {
@@ -220,7 +222,7 @@ function showJob(job) {
   if (replace) hideTurnsFrom(index);
   log.querySelector(".turn-error")?.remove();
   job.turnNode = append(turnView(question, index, { images: job.mine?.shownImages ?? [], followup, imageCount: job.mine ? 0 : image_count }));
-  job.view = progressView(job.info.started_at);
+  job.view = progressView(job.info.started_at, job.info.consult);
   job.turnNode.append(job.view.node);
   for (const event of job.events) job.view.update(event);
   setSendButton();
@@ -236,7 +238,10 @@ async function cancelTurn() {
 
 function setSendButton() {
   const job = currentJob();
-  send.textContent = job ? (job.cancelling ? "中止しています…" : "中止") : submitting ? "受け付けています…" : "調査を依頼";
+  const consult = !selectedSources().length;
+  document.getElementById("consult-hint").hidden = !consult;
+  const idle = consult ? "所長に聞く" : "調査を依頼";
+  send.textContent = job ? (job.cancelling ? "中止しています…" : "中止") : submitting ? "受け付けています…" : idle;
   send.classList.toggle("stop", Boolean(job));
   send.disabled = Boolean(job?.cancelling) || (submitting && !job);
 }
@@ -643,6 +648,7 @@ function renderSources(sources) {
       return item;
     }),
   );
+  setSendButton();
 }
 
 // 範囲を選べるソースのチップの横に出すボタン。今の選択を短く出す
@@ -1438,8 +1444,30 @@ function clarifyView({ agent, content }, index) {
   return node;
 }
 
+// 調べる場所を選ばずに所長に相談したターン。出典や調査の記録はない
+function chatView({ agent, content, model, seconds, llm_calls, trace_id }, index) {
+  const { node, body, meta } = answerFrame(agent);
+  meta.replaceChildren(el("span", "pill unset", "相談（調べていません）"), " ", [model, seconds !== undefined && formatSeconds(seconds)].filter(Boolean).join(" · "));
+  const actions = el("div", "answer-actions");
+  actions.append(copyButton(content));
+  const regenerate = el("button", "", "作り直す");
+  regenerate.type = "button";
+  regenerate.title = "同じ頼みでもう一度答えてもらう（今選んでいる調べる場所で）";
+  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").querySelector(".question").textContent, index));
+  actions.append(regenerate);
+  if (trace_id) {
+    const button = el("button", "", `LLMとのやりとり（${llm_calls}回）`);
+    button.type = "button";
+    button.addEventListener("click", () => openTrace(trace_id));
+    actions.append(button);
+  }
+  body.append(markdownView(content), actions);
+  return node;
+}
+
 function answerView(turn, index) {
   if (turn.kind === "clarify") return clarifyView(turn, index);
+  if (turn.kind === "chat") return chatView(turn, index);
   const { agent, content, model, reports, links, seconds, llm_calls, trace_id, memo_added } = turn;
   const { node, body, meta } = answerFrame(agent);
   const searches = reports.reduce((n, r) => n + r.steps.length, 0);
@@ -1551,7 +1579,8 @@ function citations(answer, links) {
 
 // 調査中の表示。所員ごとの状態と、届いた分の回答を出す
 // startedAt は調査を始めた時刻（秒）。かかっている時間を出す（ローカルLLMは時間がかかるので、止まっていないと分かるように）
-function progressView(startedAt = Date.now() / 1000) {
+// consult なら調べずに所長が答えている（相談）
+function progressView(startedAt = Date.now() / 1000, consult = false) {
   const { node, body, meta: head } = answerFrame(directorName);
   const meta = el("span");
   const elapsed = el("span", "elapsed");
@@ -1562,7 +1591,7 @@ function progressView(startedAt = Date.now() / 1000) {
   tick();
   // 画面から外れたら（回答に置き換わった・別の会話を開いた）止める。作ってすぐ画面に足すので、最初の1秒の間には足されている
   const timer = setInterval(() => (node.isConnected ? tick() : clearInterval(timer)), 1000);
-  meta.textContent = "所員が調べています…";
+  meta.textContent = consult ? "考えています…" : "所員が調べています…";
   const answer = el("div", "markdown streaming");
   const record = el("details", "record");
   record.open = true;
@@ -1611,7 +1640,7 @@ function progressView(startedAt = Date.now() / 1000) {
       row.set(r.error ? "failed" : "done", r.error ? "失敗" : "報告済み", r.error ? "" : memberNote(r));
     } else if (event.type === "director_start") {
       directorName = event.agent;
-      meta.textContent = "報告をまとめています…";
+      meta.textContent = consult ? "考えています…" : "報告をまとめています…";
       // 再調査を頼む前に書きかけた文章は捨てる
       answerText = "";
       answer.replaceChildren();
@@ -1631,7 +1660,7 @@ function progressView(startedAt = Date.now() / 1000) {
   };
   // つなぎ直したときに、始めから流れてくる進み具合で描き直す
   const reset = () => {
-    meta.textContent = "所員が調べています…";
+    meta.textContent = consult ? "考えています…" : "所員が調べています…";
     answerText = "";
     answer.replaceChildren();
     members.replaceChildren();

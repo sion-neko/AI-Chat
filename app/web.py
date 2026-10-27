@@ -33,13 +33,13 @@ API:
 
 skip_clarify: true なら所長は聞き返さずに調べる。
 images は質問に添える画像（data URL の配列。4枚・1枚5MBまで）。画像を読めるモデル（app/models.json）のときだけ受け付ける。
-sources は検索に使うソースIDの配列。scopes は {ソースID: [リポジトリやチャンネルの名前]}（省略可。ないソースは絞らない）。
+sources は検索に使うソースIDの配列。空なら調べずに所長が答える（相談）。scopes は {ソースID: [リポジトリやチャンネルの名前]}（省略可。ないソースは絞らない）。
 selection は入力欄の選択を覚えておく形 {"unchecked": [外したソースID], "scopes": {ソースID: [名前]}}。
 
 質問するPOSTは、調査を始めて {turn_id, conversation_id} をすぐ返す（同じ会話で調査中なら400）。
 調査は画面を閉じても最後まで続き、進み具合は /api/events に1行1イベントで流れる（app/jobs.py）。
 つないだときは、調査中のものを始めから流し直す。どのイベントも turn_id を持つ。
-  {"type": "job", "conversation_id", "title", "question", "index", "replace", "followup", "image_count", "started_at"}  調査を始めた
+  {"type": "job", "conversation_id", "title", "question", "index", "replace", "followup", "consult", "image_count", "started_at"}  調査を始めた
   {"type": "images_start", "agent", "count"}    所長が添えられた画像を読んでいる
   {"type": "intake_start", "agent"}             所長が依頼を受け付けている（曖昧なら聞き返す）
   {"type": "member_start", "source", "agent"}   所員が調査を始めた
@@ -206,7 +206,7 @@ def add_to_memo(conv_id: str, notes: list[dict]) -> list[dict]:
 def followup_since(history: list[dict], conversation: dict) -> str:
     """「その後どうなった？」で調べ始める日。直前の回答を調べた日（日付を持つ前の回答は、会話の更新日）。"""
     last = history[-1] if history else None
-    if not last or last["role"] != "assistant" or last.get("kind") == "clarify":
+    if not last or last["role"] != "assistant" or last.get("kind") in ("clarify", "chat"):
         raise InputError("続報を調べられるのは、所長が回答した後だけです")
     return last.get("date") or conversation["updated_at"][:10]
 
@@ -395,6 +395,8 @@ class Handler(BaseHTTPRequestHandler):
                 history = history[:start]
             since = None
             if req.get("followup"):
+                if not selected:
+                    raise InputError("続報を調べるには、調べる場所を選んでください")
                 since = followup_since(history, db.get_conversation(m[1]))
             return self._start_turn(
                 m[1],
@@ -503,6 +505,8 @@ class Handler(BaseHTTPRequestHandler):
             "index": len(history),
             "replace": replace_from is not None,
             "followup": since is not None,
+            # 調べる場所を選ばずに所長に相談している
+            "consult": not selected,
             "image_count": len(images or []),
         }
         try:
