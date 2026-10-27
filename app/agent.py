@@ -28,6 +28,13 @@ from app.sources.http import ApiError
 
 Emit = Callable[[dict], None]
 
+
+class Cancelled(BaseException):
+    """調査が中止された。emit が投げる。
+
+    所員の失敗（except Exception）として握りつぶされず、ターン全体を止めるよう BaseException にしている。
+    """
+
 # 所員1人あたりのグラフのステップ上限（LLM呼び出しとツール実行の合計）。長引く調査を打ち切るため
 MEMBER_RECURSION_LIMIT = 12
 # 所長が再調査を頼める回数（1ターンあたり）。頼んだ報告を受けたら必ず回答する

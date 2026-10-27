@@ -60,32 +60,47 @@ input.addEventListener("keydown", (e) => {
   // 日本語変換の確定Enterでは送信しない
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
-    form.requestSubmit();
+    // 調査中のEnterで中止にならないよう、送れるときだけ送る
+    if (!running) form.requestSubmit();
   }
 });
 
+// 調査中のターン。調査中は送信ボタンが中止ボタンになる
+let running = null; // { turnId, cancelling }
+
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (running) return cancelTurn();
   const content = input.value.trim();
-  if (!content || send.disabled) return;
+  if (!content) return;
 
   document.getElementById("empty")?.remove();
-  append(el("div", "msg user", content));
+  const question = append(el("div", "msg user", content));
   input.value = "";
   autosize();
 
   const progress = progressView();
   const pending = append(progress.node);
-  send.disabled = true;
+  running = { turnId: null, cancelling: false };
+  setSendButton();
   try {
     const path = currentId ? `/api/conversations/${currentId}/messages` : "/api/conversations";
     let result = null;
     await streamTurn(path, { content, sources: selectedSources() }, (event) => {
       if (event.type === "error") throw new Error(event.message);
-      if (event.type === "done") result = event;
+      if (event.type === "start") running.turnId = event.turn_id;
+      else if (event.type === "done" || event.type === "cancelled") result = event;
       else progress.update(event);
     });
     if (!result) throw new Error("応答が途中で切れました");
+    if (result.type === "cancelled") {
+      // 何も保存されていないので、質問ごと消して入力欄に戻す
+      question.remove();
+      pending.remove();
+      restoreQuestion(content);
+      if (!log.children.length) showEmpty();
+      return;
+    }
     pending.replaceWith(assistantMessage(result.turn));
     if (!currentId) {
       currentId = result.conversation_id;
@@ -93,11 +108,33 @@ form.addEventListener("submit", async (e) => {
     }
   } catch (err) {
     pending.replaceWith(el("div", "msg error", `エラー: ${err.message}`));
+    restoreQuestion(content);
   } finally {
-    send.disabled = false;
+    running = null;
+    setSendButton();
     input.focus();
   }
 });
+
+async function cancelTurn() {
+  if (!running.turnId || running.cancelling) return;
+  running.cancelling = true;
+  setSendButton();
+  await api("POST", `/api/turns/${running.turnId}/cancel`);
+}
+
+function setSendButton() {
+  send.textContent = !running ? "送信" : running.cancelling ? "中止中…" : "中止";
+  send.classList.toggle("stop", Boolean(running));
+  send.disabled = Boolean(running?.cancelling);
+}
+
+// 聞き直せるよう、質問を入力欄に戻す（入力中の文章があれば上書きしない）
+function restoreQuestion(content) {
+  if (input.value.trim()) return;
+  input.value = content;
+  autosize();
+}
 
 async function loadConfig() {
   const c = await api("GET", "/api/config");
@@ -286,8 +323,24 @@ function assistantMessage({ agent, content, model, reports }) {
   const box = el("div", "msg assistant");
   box.append(el("div", "meta", `${agent}所長 · ${model}`));
   for (const r of reports) box.append(reportView(r));
-  box.append(markdownView(content));
+  box.append(markdownView(content), copyButton(content));
   return box;
+}
+
+function copyButton(text) {
+  const button = el("button", "copy", "コピー");
+  button.type = "button";
+  button.title = "回答をMarkdownのままコピー";
+  button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      button.textContent = "コピーしました";
+    } catch {
+      button.textContent = "コピーできませんでした";
+    }
+    setTimeout(() => (button.textContent = "コピー"), 1500);
+  });
+  return button;
 }
 
 function reportView(report) {

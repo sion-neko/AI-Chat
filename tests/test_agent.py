@@ -83,6 +83,15 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(types[-2:], ["director_start", "delta"])
         self.assertEqual(self.events[-1]["text"], "回答")
 
+    def test_cancel_stops_whole_turn(self):
+        def emit(event):
+            if event["type"] == "tool":
+                raise agent.Cancelled
+
+        # 所員の中で投げられても、所員の調査失敗にならずターン全体が止まる
+        with mock.patch.object(agent, "_llm", FakeLLM([])), self.assertRaises(agent.Cancelled):
+            agent.run_turn([], "ディスク", [dummy.CHAT, dummy.WIKI], emit)
+
 
 if __name__ == "__main__":
     unittest.main()
