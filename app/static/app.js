@@ -497,6 +497,35 @@ function showComposerStatus(text) {
   setTimeout(() => composerStatus.textContent === text && (composerStatus.textContent = ""), 4000);
 }
 
+// 添えられたファイル。画像は画像として、それ以外はテキストとして入力欄に貼る
+function addFiles(files) {
+  addImages(files);
+  addTextFiles([...files].filter((f) => !f.type.startsWith("image/")));
+}
+
+// ログや設定ファイルは、中身をコードブロックにして入力欄の最後に貼る（そのままLLMに送られる）
+const TEXT_FILE_SIZE = 200_000;
+const TEXT_FILE_TYPES = "text/*,.log,.md,.csv,.tsv,.json,.yaml,.yml,.conf,.cfg,.ini,.xml,.sh,.py,.sql,.toml,.tf,.txt";
+
+async function addTextFiles(files) {
+  for (const file of files) {
+    if (file.size > TEXT_FILE_SIZE) {
+      showComposerStatus(`${file.name} は大きすぎます（${Math.round(TEXT_FILE_SIZE / 1000)}KBまで）。必要な部分だけを貼ってください`);
+      continue;
+    }
+    const text = await file.text();
+    if (text.includes("\0")) {
+      showComposerStatus(`${file.name} は文字のファイルではないので添えられません`);
+      continue;
+    }
+    // 中に ``` があっても閉じないよう、4つで囲む
+    const block = `\`\`\`\`${file.name}\n${text.replace(/\n+$/, "")}\n\`\`\`\``;
+    input.value = input.value.trim() ? `${input.value.replace(/\s+$/, "")}\n\n${block}` : `${block}\n\n`;
+    autosize();
+  }
+  input.focus();
+}
+
 async function addImages(files) {
   const images = [...files].filter((f) => f.type.startsWith("image/"));
   if (!images.length) return;
@@ -550,7 +579,7 @@ function renderAttachments() {
 
 attachButton.addEventListener("click", () => attachFile.click());
 attachFile.addEventListener("change", () => {
-  addImages(attachFile.files);
+  addFiles(attachFile.files);
   attachFile.value = "";
 });
 input.addEventListener("paste", (e) => {
@@ -569,7 +598,7 @@ form.addEventListener("drop", (e) => {
   form.classList.remove("dragging");
   if (!e.dataTransfer.files.length) return;
   e.preventDefault();
-  addImages(e.dataTransfer.files);
+  addFiles(e.dataTransfer.files);
 });
 
 // ---- 設定とソース ----
@@ -581,7 +610,7 @@ async function loadConfig() {
   const c = await api("GET", "/api/config");
   renderDestination(c);
   visionEnabled = c.vision;
-  attachButton.hidden = !c.vision;
+  attachFile.accept = (c.vision ? "image/png,image/jpeg,image/webp,image/gif," : "") + TEXT_FILE_TYPES;
   directorName = c.director;
   sourceList = c.sources;
   sourceLabels = new Map(c.sources.map((s) => [s.id, s.label]));
@@ -1326,6 +1355,17 @@ function turnView(question, index, { images = [], imageText = "", followup = fal
   node.followup = followup || Boolean(since);
   const block = el("div", "question-block");
   const bubble = el("div", "question", question);
+  // 貼ったログなどで長い質問は、たたんでおく
+  let more = null;
+  if (question.length > 600 || question.split("\n").length > 12) {
+    bubble.classList.add("clamped");
+    more = el("button", "question-more quiet", "全文を見る");
+    more.type = "button";
+    more.addEventListener("click", () => {
+      const open = bubble.classList.toggle("clamped");
+      more.textContent = open ? "全文を見る" : "たたむ";
+    });
+  }
   const edit = el("button", "question-edit", "編集");
   edit.type = "button";
   edit.title = "質問を直して調べ直す";
@@ -1333,6 +1373,7 @@ function turnView(question, index, { images = [], imageText = "", followup = fal
   const row = el("div", "question-row");
   row.append(edit, bubble);
   block.append(row);
+  if (more) block.append(more);
   if (node.followup) block.append(el("span", "pill followup followup-since", since ? followupLabel(since) : "続報"));
   if (images.length) {
     const gallery = el("div", "question-images");
@@ -1812,6 +1853,13 @@ function copyButton(text) {
 function markdownView(text) {
   const node = el("div", "markdown");
   node.append(renderMarkdown(text));
+  // コードブロック（コマンドや設定）は、そのままコピーできるようにする
+  for (const pre of node.querySelectorAll("pre")) {
+    const button = copyButton(pre.textContent);
+    button.classList.add("code-copy");
+    button.title = "このコードをコピー";
+    pre.append(button);
+  }
   return node;
 }
 

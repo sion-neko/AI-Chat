@@ -29,6 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import base64
 
+import openai
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_openai import ChatOpenAI
@@ -198,6 +199,24 @@ def _llm_slot():
         yield
 
 
+def explain_error(e: Exception) -> str:
+    """調査が失敗したときに画面に出す文。LLMのよくある失敗は、何を確かめればよいかを添える。"""
+    detail = f"{type(e).__name__}: {e}"
+    if isinstance(e, openai.APITimeoutError):
+        hint = f"LLMが{LLM_TIMEOUT:g}秒のうちに答えませんでした。LLMのサーバーが混んでいないか確かめ、必要なら .env の LLM_TIMEOUT を延ばしてください"
+    elif isinstance(e, openai.APIConnectionError):
+        hint = f"LLMにつながりません（{os.environ['LLM_BASE_URL']}）。LLMのサーバーが動いているか、.env の LLM_BASE_URL を確かめてください"
+    elif isinstance(e, openai.AuthenticationError):
+        hint = "LLMに断られました。.env の LLM_API_KEY を確かめてください"
+    elif isinstance(e, openai.NotFoundError):
+        hint = f"LLMにモデル {os.environ['LLM_MODEL']} が見つかりません。.env の LLM_MODEL を確かめてください"
+    elif isinstance(e, openai.BadRequestError) and any(w in str(e).lower() for w in ("context", "too long", "maximum", "token")):
+        hint = "会話や貼った文章が長すぎて、LLMが一度に読める量を超えました。新しい調査で、必要な部分だけを貼って聞き直してください"
+    else:
+        return detail
+    return f"{hint}（{detail}）"
+
+
 def describe_image(data_url: str, purpose: str, trace: Trace, who: str) -> str:
     """画像を読めるモデルに画像を見せ、写っている内容を文字で返す。purpose は何の画像かの説明。"""
     content = [{"type": "text", "text": f"{IMAGE_PROMPT}\n\n{purpose}"}, {"type": "image_url", "image_url": {"url": data_url}}]
@@ -330,7 +349,7 @@ def run_member(
                 elif isinstance(msg, AIMessage):
                     report["content"] = msg.text
     except Exception as e:
-        report["error"] = f"{type(e).__name__}: {e}"
+        report["error"] = explain_error(e)
 
     report["seconds"] = round(time.monotonic() - started, 2)
     emit({"type": "member_done", "report": report})
@@ -439,7 +458,7 @@ def check_llm() -> dict:
         with _llm_slot():
             answer = _llm.invoke([HumanMessage("接続の確認です。「OK」とだけ返してください。")])
     except Exception as e:
-        return {"state": "error", "message": f"{type(e).__name__}: {e}"}
+        return {"state": "error", "message": explain_error(e)}
     model = answer.response_metadata.get("model_name") or os.environ["LLM_MODEL"]
     return {"state": "ok", "message": f"{model} が応答しました"}
 

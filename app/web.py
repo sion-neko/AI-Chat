@@ -553,7 +553,7 @@ class Handler(BaseHTTPRequestHandler):
                 traceback.print_exc()
                 if is_new:
                     db.delete_conversation(conv_id)
-                jobs.publish(job, {"type": "error", "conversation_id": conv_id, "deleted": is_new, "message": f"{type(e).__name__}: {e}"})
+                jobs.publish(job, {"type": "error", "conversation_id": conv_id, "deleted": is_new, "message": agent.explain_error(e)})
 
         threading.Thread(target=work, daemon=True).start()
         return self._send_json(200, {"turn_id": job.turn_id, "conversation_id": conv_id})
