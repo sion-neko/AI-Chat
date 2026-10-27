@@ -123,6 +123,12 @@ class AgentTest(unittest.TestCase):
         self.assertIn("結論から書く", turn["trace"][0]["messages"][0]["content"])
         self.assertEqual([e["type"] for e in self.events if e["type"] != "delta"], ["director_start"])
 
+    def test_long_history_keeps_first_and_recent(self):
+        history = [{"role": "user" if i % 2 == 0 else "assistant", "content": str(i)} for i in range(30)]
+        kept = [m.content for m in agent._history_messages(history)]
+        self.assertEqual(kept, ["0", "1", *[str(i) for i in range(30 - agent.HISTORY_TURNS, 30)]])
+        self.assertEqual(len(agent._history_messages(history[:12])), 12)
+
     def test_explain_error(self):
         import httpx
         import openai

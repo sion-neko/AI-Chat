@@ -169,6 +169,9 @@ REMEMBER_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name
 - {scopes}
 - 書き足すことがなければ、何も呼ばずに「なし」とだけ答える"""
 
+# 所長に渡す過去のやりとりのターン数（最初のやりとりは別に渡す）。ローカルLLMの文脈を使い切らないように
+HISTORY_TURNS = 10
+
 # 1回の調査でメモに書き足す件数の上限
 REMEMBER_LIMIT = 3
 
@@ -485,6 +488,9 @@ def user_text(turn: dict) -> str:
 
 
 def _history_messages(history: list[dict]) -> list:
+    """所長に渡す過去のやりとり。長い会話は、最初のやりとり（何の話か）と直近の HISTORY_TURNS ターンだけにする。"""
+    if len(history) > HISTORY_TURNS + 2:
+        history = history[:2] + history[-HISTORY_TURNS:]
     return [HumanMessage(user_text(t)) if t["role"] == "user" else AIMessage(t["content"]) for t in history]
 
 
