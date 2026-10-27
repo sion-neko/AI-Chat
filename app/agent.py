@@ -144,6 +144,16 @@ def _followup_tool(sources: list[Source]) -> dict:
     }
 
 
+def _stream(llm, messages: list, emit: Emit) -> AIMessage:
+    """回答を受け取りながら、届いた文字を delta イベントで流す。ツール呼び出しも含めて全体をまとめて返す。"""
+    answer = None
+    for chunk in llm.stream(messages):
+        answer = chunk if answer is None else answer + chunk
+        if chunk.text:
+            emit({"type": "delta", "text": chunk.text})
+    return answer
+
+
 def run_director(
     director: characters.Character,
     history: list[dict],
@@ -170,7 +180,7 @@ def run_director(
     for round_ in range(FOLLOWUP_ROUNDS + 1):
         # 最後の回はツールを渡さず、回答させる
         llm = _llm.bind_tools([_followup_tool(sources)]) if round_ < FOLLOWUP_ROUNDS else _llm
-        answer = llm.invoke(messages)
+        answer = _stream(llm, messages, emit)
         if not answer.tool_calls:
             break
         messages.append(answer)

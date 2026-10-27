@@ -236,6 +236,20 @@ function progressView() {
   const rows = new Map();
   const agents = new Map();
   let director = "";
+  // 所長の回答（届いた分）。描き直しは画面の更新1回につき1度にまとめる
+  const answer = el("div", "markdown streaming");
+  let answerText = "";
+  let drawing = false;
+  const drawAnswer = () => {
+    if (drawing) return;
+    drawing = true;
+    requestAnimationFrame(() => {
+      drawing = false;
+      answer.replaceChildren(renderMarkdown(answerText));
+      if (!answer.isConnected && answerText) node.append(answer);
+      log.scrollTop = log.scrollHeight;
+    });
+  };
   const row = (key, text) => {
     if (!rows.has(key)) rows.set(key, node.appendChild(el("div")));
     rows.get(key).textContent = text;
@@ -255,6 +269,12 @@ function progressView() {
       director = event.agent;
       row("director", `🕵️ ${director}所長: 報告をまとめています…`);
       node.append(rows.get("director")); // 再調査の後は最後の行に移す
+      // 再調査を頼む前に書きかけた文章は捨てる
+      answerText = "";
+      answer.remove();
+    } else if (event.type === "delta") {
+      answerText += event.text;
+      drawAnswer();
     } else if (event.type === "followup") {
       row(`followup:${event.source}`, `🕵️ ${director}所長 → ${event.agent}: 再調査を依頼「${event.instruction}」`);
     }
