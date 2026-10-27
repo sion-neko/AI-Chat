@@ -7,6 +7,7 @@
              links: [{"url", "found"}] 回答のリンクが検索結果にあったか（app/links.py）
              seconds, llm_calls: かかった時間とLLMの呼び出し回数
              kind: "clarify" なら、調べる前に所長が聞き返したターン（content が質問。reports・links は持たない）
+             memo_added: [{"scope", "note", "folder", "saved"}] 調査のあとに所長がメモに書き足した内容
              trace_id: LLMとのやりとりの記録（traces テーブル。プロンプトを丸ごと含み大きいので分けて持つ）
 """
 
@@ -20,13 +21,26 @@ from datetime import datetime, timezone
 DB_PATH = os.environ.get("DB_PATH", "/work/data/chat.db")
 
 SCHEMA = """
+-- 案件ごとに調査をまとめるフォルダ
+CREATE TABLE IF NOT EXISTS folders (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    memo       TEXT NOT NULL DEFAULT '',   -- このフォルダの調査にだけ効くメモ
+    selection  TEXT NOT NULL DEFAULT '{}', -- このフォルダで入力欄に選んだソースと範囲（SELECTION の形）
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS conversations (
     id         TEXT PRIMARY KEY,
     title      TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     archived   INTEGER NOT NULL DEFAULT 0,
-    tags       TEXT NOT NULL DEFAULT '[]'  -- タグ名のJSON配列
+    folder_id  TEXT REFERENCES folders(id) ON DELETE SET NULL
+);
+-- 全体の設定（値はJSON）。memo: すべての調査に効くメモ、selection: フォルダの外で入力欄に選んだソースと範囲
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS turns (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +84,7 @@ def connect():
 ADDED_COLUMNS = {
     "conversations": {
         "archived": "INTEGER NOT NULL DEFAULT 0",
-        "tags": "TEXT NOT NULL DEFAULT '[]'",
+        "folder_id": "TEXT REFERENCES folders(id) ON DELETE SET NULL",
     },
 }
 
@@ -85,39 +99,51 @@ def init():
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
-def list_conversations(query: str = "", archived: bool = False) -> list[dict]:
-    """会話の一覧。query は空白区切りのAND検索で、tag:名前 はタグ、それ以外はタイトルと中身（質問・回答・調査の記録）を探す。"""
+def list_conversations(query: str = "", archived: bool = False, folder_id: str | None = None) -> list[dict]:
+    """会話の一覧。query は空白区切りのAND検索で、タイトルと中身（質問・回答・調査の記録）を探す。
+
+    folder_id を渡すとそのフォルダの会話だけ。None ならすべて。
+    """
     where, params = ["archived = ?"], [int(archived)]
+    if folder_id is not None:
+        where.append("folder_id = ?")
+        params.append(folder_id)
     for word in query.split():
-        if word.startswith("tag:") and len(word) > 4:
-            where.append("EXISTS (SELECT 1 FROM json_each(conversations.tags) WHERE value = ?)")
-            params.append(word[4:])
-        else:
-            pattern = "%" + word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            where.append(
-                "(title LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM turns WHERE turns.conversation_id = conversations.id AND data LIKE ? ESCAPE '\\'))"
-            )
-            params += [pattern, pattern]
-    sql = f"SELECT id, title, updated_at, archived, tags FROM conversations WHERE {' AND '.join(where)} ORDER BY updated_at DESC"
+        pattern = "%" + word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where.append(
+            "(title LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM turns WHERE turns.conversation_id = conversations.id AND data LIKE ? ESCAPE '\\'))"
+        )
+        params += [pattern, pattern]
+    sql = f"SELECT id, title, updated_at, archived, folder_id FROM conversations WHERE {' AND '.join(where)} ORDER BY updated_at DESC"
     with connect() as conn:
-        return [{**dict(r), "archived": bool(r["archived"]), "tags": json.loads(r["tags"])} for r in conn.execute(sql, params)]
+        return [{**dict(r), "archived": bool(r["archived"])} for r in conn.execute(sql, params)]
 
 
-def create_conversation(title: str) -> str:
+def get_conversation(conv_id: str) -> dict | None:
+    with connect() as conn:
+        row = conn.execute("SELECT id, title, updated_at, archived, folder_id FROM conversations WHERE id = ?", (conv_id,)).fetchone()
+        return {**dict(row), "archived": bool(row["archived"])} if row else None
+
+
+def create_conversation(title: str, folder_id: str | None = None) -> str:
     conv_id = uuid.uuid4().hex
     now = _now()
     with connect() as conn:
         conn.execute(
-            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (conv_id, title, now, now),
+            "INSERT INTO conversations (id, title, created_at, updated_at, folder_id) VALUES (?, ?, ?, ?, ?)",
+            (conv_id, title, now, now, folder_id),
         )
     return conv_id
 
 
-def update_conversation(conv_id: str, title: str | None = None, archived: bool | None = None, tags: list[str] | None = None) -> bool:
-    """渡された項目だけ書き換える。会話がなければ False。更新日は変えない（並び順が動かないように）。"""
-    changes = {"title": title, "archived": None if archived is None else int(archived), "tags": None if tags is None else json.dumps(tags, ensure_ascii=False)}
-    changes = {k: v for k, v in changes.items() if v is not None}
+def update_conversation(conv_id: str, **changes) -> bool:
+    """渡された項目（title, archived, folder_id）だけ書き換える。folder_id=None はフォルダから出す。
+
+    会話がなければ False。更新日は変えない（並び順が動かないように）。
+    """
+    assert set(changes) <= {"title", "archived", "folder_id"}
+    if "archived" in changes:
+        changes["archived"] = int(changes["archived"])
     with connect() as conn:
         if not conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conv_id,)).fetchone():
             return False
@@ -126,15 +152,72 @@ def update_conversation(conv_id: str, title: str | None = None, archived: bool |
     return True
 
 
-def all_tags() -> list[str]:
-    with connect() as conn:
-        rows = conn.execute("SELECT DISTINCT value FROM conversations, json_each(conversations.tags) ORDER BY value")
-        return [r["value"] for r in rows]
-
-
 def delete_conversation(conv_id: str):
     with connect() as conn:
         conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
+
+
+# ---- フォルダ ----
+
+
+def _folder(row) -> dict:
+    return {**dict(row), "selection": json.loads(row["selection"])}
+
+
+def list_folders() -> list[dict]:
+    """フォルダの一覧（名前順）。count はアーカイブしていない調査の数。"""
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT f.*, (SELECT COUNT(*) FROM conversations c WHERE c.folder_id = f.id AND c.archived = 0) AS count
+               FROM folders f ORDER BY f.name"""
+        )
+        return [_folder(r) for r in rows]
+
+
+def get_folder(folder_id: str) -> dict | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM folders WHERE id = ?", (folder_id,)).fetchone()
+        return _folder(row) if row else None
+
+
+def create_folder(name: str) -> str:
+    folder_id = uuid.uuid4().hex
+    with connect() as conn:
+        conn.execute("INSERT INTO folders (id, name, created_at) VALUES (?, ?, ?)", (folder_id, name, _now()))
+    return folder_id
+
+
+def update_folder(folder_id: str, **changes) -> bool:
+    """渡された項目（name, memo, selection）だけ書き換える。フォルダがなければ False。"""
+    assert set(changes) <= {"name", "memo", "selection"}
+    if "selection" in changes:
+        changes["selection"] = json.dumps(changes["selection"], ensure_ascii=False)
+    with connect() as conn:
+        if not conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone():
+            return False
+        if changes:
+            conn.execute(f"UPDATE folders SET {', '.join(f'{k} = ?' for k in changes)} WHERE id = ?", (*changes.values(), folder_id))
+    return True
+
+
+def delete_folder(folder_id: str):
+    """フォルダを消す。中の調査は消さず、フォルダの外に出す。"""
+    with connect() as conn:
+        conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+
+
+# ---- 全体の設定 ----
+
+
+def get_setting(key: str, default=None):
+    with connect() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return json.loads(row["value"]) if row else default
+
+
+def set_setting(key: str, value):
+    with connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, json.dumps(value, ensure_ascii=False)))
 
 
 def load_turns(conv_id: str) -> list[dict] | None:

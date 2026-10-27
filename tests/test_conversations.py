@@ -33,12 +33,7 @@ class ConversationsTest(unittest.TestCase):
         self.assertEqual(self.titles("100%_done"), ["ディスク増設どうなった？"])
         self.assertEqual(self.titles("%"), ["ディスク増設どうなった？"])
 
-    def test_tags_and_archive(self):
-        db.update_conversation(self.disk, tags=["監視", "ストレージ"])
-        self.assertEqual(self.titles("tag:監視"), ["ディスク増設どうなった？"])
-        self.assertEqual(self.titles("tag:監視 VPN"), [])
-        self.assertEqual(db.all_tags(), ["ストレージ", "監視"])
-
+    def test_rename_and_archive(self):
         db.update_conversation(self.vpn, archived=True, title="VPN証明書")
         self.assertEqual(self.titles(), ["ディスク増設どうなった？"])
         self.assertEqual(self.titles(archived=True), ["VPN証明書"])
@@ -50,7 +45,7 @@ class ConversationsTest(unittest.TestCase):
                                "CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
                                "INSERT INTO conversations VALUES ('a', '古い会話', 'x', 'x');")
         db.init()
-        self.assertEqual(db.list_conversations(), [{"id": "a", "title": "古い会話", "updated_at": "x", "archived": False, "tags": []}])
+        self.assertEqual(db.list_conversations(), [{"id": "a", "title": "古い会話", "updated_at": "x", "archived": False, "folder_id": None}])
 
     def test_replace_turns(self):
         db.append_turns(self.disk, [{"role": "user", "content": "その後は？"}, {"role": "assistant", "content": "古い回答", "trace_id": db.save_trace(self.disk, [{"who": "x"}])}])
@@ -59,11 +54,64 @@ class ConversationsTest(unittest.TestCase):
         self.assertEqual([t["content"] for t in db.load_turns(self.disk)], ["ディスク増設どうなった？", "NASを入れ替えました 100%_done", "その後どうなった？", "新しい回答"])
         self.assertIsNone(db.load_trace(old_trace))
 
-    def test_validation(self):
-        self.assertEqual(web.conversation_changes({"tags": [" 監視 ", "tag:監視", "", "NAS"]}), {"tags": ["監視", "NAS"]})
-        for bad in ({"title": "  "}, {"tags": "監視"}, {"tags": ["a b"]}, {"tags": ["あ" * 21]}, {"tags": [str(i) for i in range(11)]}):
+    def test_folders(self):
+        folder = db.create_folder("案件X")
+        db.update_conversation(self.disk, folder_id=folder)
+        self.assertEqual(self.titles_in(folder), ["ディスク増設どうなった？"])
+        self.assertEqual([(f["name"], f["count"]) for f in db.list_folders()], [("案件X", 1)])
+
+        db.update_folder(folder, memo="監視サーバー＝mon01", selection={"unchecked": ["dummy_wiki"], "scopes": {"github": ["me/infra"]}})
+        self.assertEqual(db.get_folder(folder)["selection"]["scopes"], {"github": ["me/infra"]})
+        self.assertEqual(web.memos_for(self.disk, None)["folder"], {"name": "案件X", "memo": "監視サーバー＝mon01"})
+
+        # フォルダから出す
+        db.update_conversation(self.disk, folder_id=None)
+        self.assertEqual(self.titles_in(folder), [])
+        # フォルダを消しても、中の調査は消えずにフォルダの外に出る
+        db.update_conversation(self.vpn, folder_id=folder)
+        db.delete_folder(folder)
+        self.assertEqual(db.get_conversation(self.vpn)["folder_id"], None)
+        self.assertEqual(len(self.titles()), 2)
+
+    def titles_in(self, folder_id):
+        return [c["title"] for c in db.list_conversations(folder_id=folder_id)]
+
+    def test_settings(self):
+        self.assertEqual(web.settings(), {"memo": "", "selection": {}})
+        db.set_setting("memo", "回答は箇条書きで")
+        self.assertEqual(web.memos_for(None, None), {"global": "回答は箇条書きで", "folder": None})
+
+    def test_add_to_memo(self):
+        folder = db.create_folder("案件X")
+        db.update_conversation(self.disk, folder_id=folder)
+        db.update_folder(folder, memo="- 既存のメモ")
+        added = web.add_to_memo(self.disk, [{"scope": "folder", "note": "監視サーバーは mon01"}, {"scope": "global", "note": "結論から書く"}])
+        self.assertEqual(added, [
+            {"scope": "folder", "note": "監視サーバーは mon01", "folder": "案件X", "saved": True},
+            {"scope": "global", "note": "結論から書く", "folder": None, "saved": True},
+        ])
+        self.assertEqual(db.get_folder(folder)["memo"], "- 既存のメモ\n- 監視サーバーは mon01")
+        self.assertEqual(db.get_setting("memo"), "- 結論から書く")
+
+        # 上限を超えるものは書かない。フォルダに入っていない調査のフォルダ向けメモは捨てる
+        db.set_setting("memo", "あ" * (web.MEMO_LENGTH - 3))
+        added = web.add_to_memo(self.vpn, [{"scope": "global", "note": "長すぎる"}, {"scope": "folder", "note": "x"}])
+        self.assertEqual(added, [{"scope": "global", "note": "長すぎる", "folder": None, "saved": False}])
+        self.assertEqual(len(db.get_setting("memo")), web.MEMO_LENGTH - 3)
+
+    def test_folder_validation(self):
+        self.assertEqual(web.folder_changes({"name": " 案件X ", "memo": " メモ "}), {"name": "案件X", "memo": "メモ"})
+        self.assertEqual(web.folder_changes({"selection": {"unchecked": ["a"], "scopes": {"github": [], "gitlab": ["x/y"]}}}), {"selection": {"unchecked": ["a"], "scopes": {"gitlab": ["x/y"]}}})
+        for bad in ({"name": " "}, {"memo": "あ" * (web.MEMO_LENGTH + 1)}, {"selection": []}, {"selection": {"unchecked": "a"}}, {"selection": {"scopes": {"g": "x"}}}):
             with self.assertRaises(web.InputError):
-                web.conversation_changes(bad)
+                web.folder_changes(bad)
+        with self.assertRaises(web.InputError):
+            web.conversation_changes({"folder_id": "nope"})
+
+    def test_validation(self):
+        self.assertEqual(web.conversation_changes({"title": " VPN証明書 ", "archived": 1}), {"title": "VPN証明書", "archived": True})
+        with self.assertRaises(web.InputError):
+            web.conversation_changes({"title": "  "})
 
 
 if __name__ == "__main__":

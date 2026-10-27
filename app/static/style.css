@@ -52,6 +52,9 @@
 
 * { box-sizing: border-box; }
 
+/* display を指定したクラスでも、hidden を付けたら必ず隠す */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
@@ -159,10 +162,6 @@ button.quiet:hover { color: var(--ink); background: var(--shelf); }
 
 .conv-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
-.conv-tag { flex-shrink: 0; font-size: var(--text-xs); color: var(--muted); }
-
-.conv-tag::before { content: "#"; }
-
 .archive-toggle { width: 100%; font-size: var(--text-xs); }
 
 .sidebar.archive-mode .conversations::before {
@@ -180,6 +179,131 @@ button.quiet:hover { color: var(--ink); background: var(--shelf); }
 .conv-delete:hover { color: var(--error); }
 
 .conv-empty { padding: 8px 10px; font-size: var(--text-sm); color: var(--muted); }
+
+/* フォルダ */
+
+.folders { display: flex; flex-direction: column; gap: 2px; max-height: 35vh; overflow-y: auto; }
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 4px 0 8px;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  letter-spacing: 0.08em;
+}
+
+.section-head button { padding: 0 6px; font-size: var(--text-xs); }
+
+.folder-list { display: flex; flex-direction: column; gap: 1px; }
+
+.folder-item { display: flex; align-items: center; border-radius: 6px; }
+
+.folder-item:hover { background: var(--line); }
+
+.folder-item.active { background: var(--surface); box-shadow: inset 3px 0 0 var(--accent); }
+
+.folder-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border: none;
+  background: none;
+  text-align: left;
+  font-size: var(--text-sm);
+}
+
+.folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.folder-name::before { content: "▸ "; color: var(--muted); }
+
+.folder-item.active .folder-name { font-weight: bold; }
+
+.folder-count { margin-left: auto; font-size: var(--text-xs); color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.folder-settings { visibility: hidden; border: none; background: none; padding: 2px 8px; font-size: var(--text-xs); color: var(--muted); }
+
+.folder-item:hover .folder-settings { visibility: visible; }
+
+.folder-settings:hover { color: var(--accent); }
+
+.folder-input {
+  margin: 2px 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: var(--text-sm);
+}
+
+.crumb {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  padding: 0 2px;
+  font-size: var(--text-md);
+  color: var(--muted);
+}
+
+.crumb:hover { color: var(--accent); }
+
+.move { display: flex; align-items: center; gap: 6px; font-size: var(--text-xs); color: var(--muted); }
+
+.move select {
+  max-width: 160px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  font: inherit;
+  font-size: var(--text-xs);
+  color: var(--ink);
+}
+
+.folder-form { display: flex; flex-direction: column; gap: 12px; }
+
+/* メモ */
+
+.memo-form { display: flex; flex-direction: column; gap: 14px; }
+
+.memo-field > span { display: flex; align-items: baseline; gap: 8px; font-size: var(--text-sm); color: var(--ink); }
+
+.memo-field small { font-size: var(--text-xs); color: var(--muted); }
+
+.memo-field textarea { font-family: var(--font-body); line-height: 1.7; }
+
+.memo-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+.memo-count.over { color: var(--error); font-weight: bold; }
+
+.memo-added {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--cheek);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--shelf);
+  font-size: var(--text-sm);
+}
+
+.memo-added-head { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: var(--text-xs); }
+
+.memo-added-head button { padding: 0 6px; font-size: var(--text-xs); }
+
+.memo-added ul { margin: 4px 0 0; padding-left: 1.2em; }
+
+.memo-where { margin-right: 6px; font-size: var(--text-xs); color: var(--muted); }
+
+.memo-added li.not-saved { color: var(--muted); text-decoration: line-through; }
+
+.memo-full { margin-left: 6px; font-size: var(--text-xs); color: var(--error); text-decoration: none; display: inline-block; }
+
+button.danger { color: var(--error); }
+
+button.danger:hover { background: var(--error-soft); }
 
 /* ---- 右：調査 ---- */
 
@@ -218,32 +342,6 @@ button.quiet:hover { color: var(--ink); background: var(--shelf); }
   font-size: var(--text-md);
   font-weight: bold;
 }
-
-/* タグ */
-
-.tags { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-width: 0; }
-
-.tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 0 4px 0 8px;
-  border-radius: 999px;
-  background: var(--shelf);
-  font-size: var(--text-xs);
-  color: var(--muted);
-  cursor: pointer;
-}
-
-.tag:hover { color: var(--accent); }
-
-.tag-remove { border: none; background: none; padding: 0 4px; font-size: var(--text-xs); color: var(--muted); }
-
-.tag-remove:hover { color: var(--error); }
-
-.tag-add { border: 1px dashed var(--line); background: none; padding: 0 8px; border-radius: 999px; font-size: var(--text-xs); color: var(--muted); }
-
-.tag-input { width: 120px; padding: 0 8px; border: 1px solid var(--accent); border-radius: 999px; background: var(--surface); font-size: var(--text-xs); }
 
 .model {
   font-family: var(--font-mono);
