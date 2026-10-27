@@ -20,8 +20,10 @@ LLMとのやりとりは Trace に記録し、返り値の trace に入れる（
 """
 
 import os
+import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 
@@ -147,11 +149,26 @@ REMEMBER_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name
 # 1回の調査でメモに書き足す件数の上限
 REMEMBER_LIMIT = 3
 
+# LLMを同時に呼ぶ数の上限。所員は並列に動くので、GPU1台のローカルLLMサーバーが詰まらないよう絞る
+LLM_CONCURRENCY = int(os.environ.get("LLM_CONCURRENCY") or 2)
+# 1回の呼び出しを待つ上限（秒）。サーバーが固まっても調査が終わらなくならないように
+LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT") or 300)
+
 _llm = ChatOpenAI(
     base_url=os.environ["LLM_BASE_URL"],
     api_key=os.environ["LLM_API_KEY"],
     model=os.environ["LLM_MODEL"],
+    timeout=LLM_TIMEOUT,
+    max_retries=1,
 )
+_llm_slots = threading.BoundedSemaphore(LLM_CONCURRENCY)
+
+
+@contextmanager
+def _llm_slot():
+    """LLMを呼ぶ間だけ枠を1つ使う。LLMの呼び出しはすべてこの中で行う。"""
+    with _llm_slots:
+        yield
 
 
 def describe_image(data_url: str, purpose: str, trace: Trace, who: str) -> str:
@@ -159,7 +176,8 @@ def describe_image(data_url: str, purpose: str, trace: Trace, who: str) -> str:
     content = [{"type": "text", "text": f"{IMAGE_PROMPT}\n\n{purpose}"}, {"type": "image_url", "image_url": {"url": data_url}}]
     messages = [HumanMessage(content=content)]
     started = time.monotonic()
-    answer = _llm.invoke(messages)
+    with _llm_slot():
+        answer = _llm.invoke(messages)
     trace.record(who, messages, [], answer, time.monotonic() - started)
     return answer.text.strip()
 
@@ -200,7 +218,8 @@ def _tool_loop(system_prompt: str, tools: list[BaseTool], trace: Trace, who: str
     def call_llm(state: MessagesState):
         messages = [SystemMessage(system_prompt), *state["messages"]]
         started = time.monotonic()
-        response = llm.invoke(messages)
+        with _llm_slot():
+            response = llm.invoke(messages)
         trace.record(who, messages, tools, response, time.monotonic() - started)
         return {"messages": [response]}
 
@@ -312,10 +331,11 @@ def _stream(llm, messages: list, emit: Emit, trace: Trace, who: str, tools: list
     """回答を受け取りながら、届いた文字を delta イベントで流す。ツール呼び出しも含めて全体をまとめて返す。"""
     started = time.monotonic()
     answer = None
-    for chunk in llm.stream(messages):
-        answer = chunk if answer is None else answer + chunk
-        if chunk.text:
-            emit({"type": "delta", "text": chunk.text})
+    with _llm_slot():
+        for chunk in llm.stream(messages):
+            answer = chunk if answer is None else answer + chunk
+            if chunk.text:
+                emit({"type": "delta", "text": chunk.text})
     trace.record(who, messages, tools, answer, time.monotonic() - started)
     return answer
 
@@ -379,7 +399,8 @@ def run_director(
 def check_llm() -> dict:
     """LLMに短い質問を1回送って、つながるか確かめる。結果は sources.check と同じ形。"""
     try:
-        answer = _llm.invoke([HumanMessage("接続の確認です。「OK」とだけ返してください。")])
+        with _llm_slot():
+            answer = _llm.invoke([HumanMessage("接続の確認です。「OK」とだけ返してください。")])
     except Exception as e:
         return {"state": "error", "message": f"{type(e).__name__}: {e}"}
     model = answer.response_metadata.get("model_name") or os.environ["LLM_MODEL"]
@@ -421,7 +442,8 @@ def intake(director: characters.Character, history: list[dict], question: str, t
     messages = [SystemMessage(prompt), *_history_messages(history), HumanMessage(question)]
     started = time.monotonic()
     try:
-        answer = _llm.bind_tools([ASK_USER_TOOL]).invoke(messages)
+        with _llm_slot():
+            answer = _llm.bind_tools([ASK_USER_TOOL]).invoke(messages)
     except Exception:
         return None
     trace.record(f"{director.name}所長（受付）", messages, [ASK_USER_TOOL], answer, time.monotonic() - started)
@@ -490,7 +512,8 @@ def remember(
     tool = _remember_tool(has_folder)
     started = time.monotonic()
     try:
-        response = _llm.bind_tools([tool]).invoke(messages)
+        with _llm_slot():
+            response = _llm.bind_tools([tool]).invoke(messages)
     except Exception:
         return []
     trace.record(f"{director.name}所長（メモ）", messages, [tool], response, time.monotonic() - started)

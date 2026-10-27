@@ -1,5 +1,7 @@
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -34,7 +36,7 @@ class FakeLLM:
         self.director_calls = 0
 
     def bind_tools(self, tools):
-        bound = FakeLLM.__new__(FakeLLM)
+        bound = type(self).__new__(type(self))
         bound.__dict__ = self.__dict__.copy()
         bound.tools = tools
         bound.parent = self
@@ -255,6 +257,27 @@ class AgentTest(unittest.TestCase):
                 turn = agent.run_turn([], "ディスク", [source], self.events.append, clarify=False)
             member = next(c for c in turn["trace"] if c["who"].endswith("（写真）"))
             self.assertEqual("view_image" in member["tools"], expected, model)
+
+    def test_llm_calls_are_limited(self):
+        class SlowLLM(FakeLLM):
+            running = 0
+            peak = 0
+            lock = threading.Lock()
+
+            def invoke(self, messages):
+                with SlowLLM.lock:
+                    SlowLLM.running += 1
+                    SlowLLM.peak = max(SlowLLM.peak, SlowLLM.running)
+                time.sleep(0.05)
+                with SlowLLM.lock:
+                    SlowLLM.running -= 1
+                return super().invoke(messages)
+
+        # 所員は並列に動くが、LLMを同時に呼ぶのは枠の数まで
+        with mock.patch.object(agent, "_llm_slots", threading.BoundedSemaphore(1)):
+            turn = self.run_turn(SlowLLM([]))
+        self.assertEqual(turn["content"], "回答")
+        self.assertEqual(SlowLLM.peak, 1)
 
     def test_cancel_stops_whole_turn(self):
         def emit(event):

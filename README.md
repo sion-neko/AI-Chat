@@ -91,6 +91,9 @@ python scripts/make_dist.py --env dist.env   # → dist/ai-chat-YYYYMMDD.zip
 `.env` の `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` を書き換えて `docker compose up -d`（例は `.env.example`）。
 エンドポイントは OpenAI互換（`/v1/chat/completions` + `tools`）であることを前提にしている。
 
+所員は並列に動くが、LLMを同時に呼ぶのは `LLM_CONCURRENCY`（既定 2）件まで。ローカルLLMのサーバーが詰まるならこれを 1 にする。
+1回の呼び出しは `LLM_TIMEOUT` 秒（既定 300）で打ち切る。
+
 ### 画像を読めるモデル
 
 画像を読めるかどうかは、`LLM_MODEL` から `app/models.json` の対応表で自動で決まる（設定で切り替えるものではない）。
