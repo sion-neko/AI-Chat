@@ -415,6 +415,8 @@ button.danger:hover { background: var(--error-soft); }
 
 .answer-actions button { padding: 2px 10px; font-size: var(--text-xs); color: var(--muted); }
 
+.answer-actions .followup-ask { color: var(--accent); }
+
 .error-text { color: var(--error); }
 
 /* 調査の記録（調査中の表示と、回答の下の記録で同じ形を使う） */

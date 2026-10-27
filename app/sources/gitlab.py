@@ -65,6 +65,7 @@ def search_gitlab(query: str, since: str | None = None, until: str | None = None
     state: "opened" / "closed" / "merged"（mergedはMerge Requestだけ）。省略するとすべて
     新しく更新された順に最大20件。本文は先頭だけなので、詳しくは get_gitlab_item で読む。
     """
+    since = scope.since(since)  # 続報を調べるときは、前回の調査より前を探さない
     # 画面で選んだプロジェクトがあればそれぞれで検索する。なければ .env の GITLAB_GROUP か、見られる全体
     group = os.environ.get("GITLAB_GROUP")
     if projects := scope.get():

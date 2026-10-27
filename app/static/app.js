@@ -123,7 +123,8 @@ form.addEventListener("submit", (e) => {
 // 質問して調査させる。fromTurn（質問のターンの位置）があれば、そこから後をやり直す
 // skipClarify なら所長は聞き返さずに調べる
 // images は新しく添える画像（data URL）。shownImages は質問に並べて見せる画像（やり直しでは元の質問の画像）
-async function ask(content, fromTurn, skipClarify = false, images = [], shownImages = images) {
+// followup なら続報の調査（直前の回答を調べた日より後の動きだけを調べる）
+async function ask(content, fromTurn, skipClarify = false, images = [], shownImages = images, followup = false) {
   if (document.getElementById("empty")) {
     log.replaceChildren();
     renderHead({ title: content });
@@ -133,7 +134,7 @@ async function ask(content, fromTurn, skipClarify = false, images = [], shownIma
     for (const node of [...log.querySelectorAll(".turn")].filter((n) => Number(n.dataset.index) >= fromTurn)) node.remove();
   }
   const index = fromTurn ?? turnCount;
-  const turn = append(turnView(content, index, { images: shownImages }));
+  const turn = append(turnView(content, index, { images: shownImages, followup }));
 
   const progress = progressView();
   turn.append(progress.node);
@@ -146,6 +147,7 @@ async function ask(content, fromTurn, skipClarify = false, images = [], shownIma
     if (fromTurn !== null) body.from_turn = fromTurn;
     if (skipClarify) body.skip_clarify = true;
     if (images.length) body.images = images;
+    if (followup) body.followup = true;
     let result = null;
     await streamTurn(path, body, (event) => {
       if (event.type === "error") throw new Error(event.message);
@@ -164,6 +166,8 @@ async function ask(content, fromTurn, skipClarify = false, images = [], shownIma
     }
     progress.node.replaceWith(answerView(result.turn, index));
     if (result.question.image_text) turn.querySelector(".question-block").append(imageTextView(result.question.image_text));
+    if (result.question.since) turn.querySelector(".followup-since").textContent = followupLabel(result.question.since);
+    showFollowupOnLast();
     turnCount = index + 2;
     setPlaceholder(result.turn);
     if (!currentId) {
@@ -658,12 +662,13 @@ async function openConversation(id) {
   data.turns.forEach((t, i) => {
     if (t.role === "user") {
       const images = (t.images ?? []).map((id) => `/api/images/${id}`);
-      nodes.push(turnView(t.content, i, { images, imageText: t.image_text }));
+      nodes.push(turnView(t.content, i, { images, imageText: t.image_text, since: t.since }));
     }
     else nodes.at(-1).append(answerView(t, i - 1));
   });
   turnCount = data.turns.length;
   log.replaceChildren(...nodes);
+  showFollowupOnLast();
   log.scrollTop = log.scrollHeight;
   setPlaceholder(data.turns.at(-1));
   highlightCurrent();
@@ -948,10 +953,11 @@ function highlightCurrent() {
 // 1往復分の入れ物。質問を出し、回答はあとから足す
 // index は質問のターンの位置。やり直すときにサーバーへ渡す
 // images は質問に添えた画像のURL、imageText はそれを所長が文字に起こしたもの
-function turnView(question, index, { images = [], imageText = "" } = {}) {
+function turnView(question, index, { images = [], imageText = "", followup = false, since = "" } = {}) {
   const node = el("section", "turn");
   node.dataset.index = index;
   node.images = images;
+  node.followup = followup || Boolean(since);
   const block = el("div", "question-block");
   const bubble = el("div", "question", question);
   const edit = el("button", "question-edit", "編集");
@@ -961,6 +967,7 @@ function turnView(question, index, { images = [], imageText = "" } = {}) {
   const row = el("div", "question-row");
   row.append(edit, bubble);
   block.append(row);
+  if (node.followup) block.append(el("span", "pill followup followup-since", since ? followupLabel(since) : "続報"));
   if (images.length) {
     const gallery = el("div", "question-images");
     for (const src of images) {
@@ -973,6 +980,22 @@ function turnView(question, index, { images = [], imageText = "" } = {}) {
   if (imageText) block.append(imageTextView(imageText));
   node.append(block);
   return node;
+}
+
+function followupLabel(since) {
+  return `続報（${since} 以降）`;
+}
+
+// 「その後どうなった？」は最後の回答にだけ出す（途中の回答の続報は、会話の流れと合わなくなる）
+function showFollowupOnLast() {
+  // 最後が所長の聞き返しなら、どれも出さない（先に答えてもらう）
+  const last = [...log.querySelectorAll(".turn")].at(-1);
+  for (const b of log.querySelectorAll(".followup-ask")) b.hidden = b.closest(".turn") !== last;
+}
+
+function askFollowup() {
+  if (running) return;
+  ask("その後どうなった？", null, false, [], [], true);
 }
 
 // 添えた画像から所長が読み取った内容。読み違いに気づけるよう、たたんで出しておく
@@ -991,7 +1014,8 @@ function confirmRedo(index) {
 // 画像はサーバーが元の質問のものを使い直すので、送らずに見せるだけ
 function redo(content, index, skipClarify = false) {
   if (running || !confirmRedo(index)) return;
-  ask(content, index, skipClarify, [], turnImages(index));
+  const node = log.querySelector(`.turn[data-index="${index}"]`);
+  ask(content, index, skipClarify, [], turnImages(index), Boolean(node?.followup));
 }
 
 function turnImages(index) {
@@ -1025,7 +1049,7 @@ function editQuestion(node, question, index) {
     const content = field.value.trim();
     if (!content) return;
     if (running || !confirmRedo(index)) return;
-    ask(content, index, false, [], node.images);
+    ask(content, index, false, [], node.images, node.followup);
   });
   field.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -1091,6 +1115,11 @@ function answerView(turn, index) {
   regenerate.title = "同じ質問でもう一度調べる";
   regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").querySelector(".question").textContent, index));
   actions.append(regenerate);
+  const followup = el("button", "followup-ask", "その後どうなった？");
+  followup.type = "button";
+  followup.title = turn.date ? `${turn.date} 以降の動きだけを調べる` : "この回答の日以降の動きだけを調べる";
+  followup.addEventListener("click", askFollowup);
+  actions.append(followup);
   if (trace_id) {
     const button = el("button", "", `LLMとのやりとり（${llm_calls}回）`);
     button.type = "button";

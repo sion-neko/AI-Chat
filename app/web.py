@@ -194,6 +194,14 @@ def add_to_memo(conv_id: str, notes: list[dict]) -> list[dict]:
     return result
 
 
+def followup_since(history: list[dict], conversation: dict) -> str:
+    """「その後どうなった？」で調べ始める日。直前の回答を調べた日（日付を持つ前の回答は、会話の更新日）。"""
+    last = history[-1] if history else None
+    if not last or last["role"] != "assistant" or last.get("kind") == "clarify":
+        raise InputError("続報を調べられるのは、所長が回答した後だけです")
+    return last.get("date") or conversation["updated_at"][:10]
+
+
 def memos_for(conv_id: str | None, folder_id: str | None) -> dict:
     """調査のプロンプトに入れるメモ。会話がフォルダに入っていれば、そのフォルダのメモも。"""
     if conv_id:
@@ -362,6 +370,9 @@ class Handler(BaseHTTPRequestHandler):
                     image_ids = history[start]["images"]
                     images = [db.load_image(i) for i in image_ids]
                 history = history[:start]
+            since = None
+            if req.get("followup"):
+                since = followup_since(history, db.get_conversation(m[1]))
             return self._stream_turn(
                 m[1],
                 history,
@@ -373,6 +384,7 @@ class Handler(BaseHTTPRequestHandler):
                 clarify=not req.get("skip_clarify"),
                 images=images,
                 image_ids=image_ids,
+                since=since,
             )
         if self.path == "/api/mcp":
             conf = self._read_json()
@@ -450,11 +462,13 @@ class Handler(BaseHTTPRequestHandler):
         clarify: bool = True,
         images: list[tuple[str, bytes]] | None = None,
         image_ids: list[str] | None = None,
+        since: str | None = None,
     ):
         """調査を別スレッドで走らせ、キューに溜まったイベントを1行ずつ書き出す。
 
         所員は並列で動くので、レスポンスへの書き込みはこのスレッドだけで行う。
         images は質問に添えられた画像。調査が成功したときだけ保存する（image_ids があれば、保存済みの同じ画像）。
+        since は続報を調べるときの前回の調査日（followup_since）。
         """
         events: queue.Queue[dict | None] = queue.Queue()
         turn_id = uuid.uuid4().hex
@@ -469,11 +483,13 @@ class Handler(BaseHTTPRequestHandler):
         def work():
             try:
                 urls = [_data_url(mime, data) for mime, data in images or []]
-                turn = agent.run_turn(history, question, selected, emit, scopes, clarify, memos_for(conv_id, None), urls)
+                turn = agent.run_turn(history, question, selected, emit, scopes, clarify, memos_for(conv_id, None), urls, since)
                 turn["trace_id"] = db.save_trace(conv_id, turn.pop("trace"))
                 if "memo_notes" in turn:
                     turn["memo_added"] = add_to_memo(conv_id, turn.pop("memo_notes"))
                 asked = {"role": "user", "content": question}
+                if since:
+                    asked["since"] = since
                 if images:
                     asked["images"] = image_ids or [db.save_image(conv_id, mime, data) for mime, data in images]
                     asked["image_text"] = turn.pop("image_text", "")
