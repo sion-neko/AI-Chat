@@ -606,9 +606,44 @@ dialog::backdrop { background: rgb(20 24 30 / 0.45); }
 
 .answer-actions { align-items: center; }
 
+/* 出典 */
+
+.markdown a.cite {
+  font-size: 0.78em;
+  vertical-align: 0.35em;
+  text-decoration: none;
+  margin: 0 1px;
+  font-variant-numeric: tabular-nums;
+}
+
 .markdown a.unverified { color: var(--error); text-decoration-style: dashed; }
 
-.markdown a.unverified::after { content: " ⚠"; font-size: 0.85em; }
+.markdown a.unverified::after { content: "⚠"; font-size: 0.85em; }
+
+.citations { margin-top: 12px; font-size: var(--text-sm); }
+
+.citations > summary { display: flex; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; width: fit-content; }
+
+.citation-list { margin: 6px 0 0; padding-left: 2em; display: flex; flex-direction: column; gap: 4px; font-variant-numeric: tabular-nums; }
+
+.citation-list li::marker { color: var(--muted); }
+
+.citation-list a { color: var(--accent); text-underline-offset: 2px; overflow-wrap: anywhere; }
+
+.citation-meta { margin-left: 8px; font-size: var(--text-xs); color: var(--muted); }
+
+.citation-url {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.citation-list li.unverified a { color: var(--error); text-decoration-style: dashed; }
+
+.citation-list li.unverified .citation-meta { color: var(--error); }
 
 /* LLMとのやりとり */
 

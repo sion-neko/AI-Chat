@@ -677,28 +677,58 @@ function answerView({ agent, content, model, reports, links, seconds, llm_calls,
     button.addEventListener("click", () => openTrace(trace_id));
     actions.append(button);
   }
-  // 照合の結果がない（照合を入れる前の）回答には何も出さない
-  if (links) actions.append(markLinks(answer, links));
   const record = el("details", "record");
   record.append(el("summary", "", "調査の記録を見る"), membersView(reports.map(memberView)));
-  body.append(answer, actions, record);
+  body.append(answer);
+  // 照合の結果がない（照合を入れる前の）回答には出典を出さない
+  if (links) body.append(citations(answer, links));
+  body.append(actions, record);
   return node;
 }
 
-// 検索結果になかったリンクに印を付け、根拠の件数を返す
-function markLinks(answer, links) {
-  const key = (url) => url.replace(/[.,;:!?]+$/, "").replace(/\/+$/, "");
-  const missing = new Set(links.filter((l) => !l.found).map((l) => key(l.url)));
-  for (const a of answer.querySelectorAll("a")) {
-    if (!missing.has(key(a.getAttribute("href")))) continue;
-    a.classList.add("unverified");
-    a.title = "所員の検索結果にないリンクです。LLMが作ったURLかもしれません";
+// 回答の中のリンクに出典の番号を振り、出典の一覧を返す。検索結果になかったリンクには印を付ける
+function citations(answer, links) {
+  if (!links.length) {
+    const none = el("div", "citations");
+    none.append(el("span", "pill unset", "根拠のリンクがありません"));
+    return none;
   }
-  if (!links.length) return el("span", "pill unset", "根拠のリンクなし");
-  if (!missing.size) return el("span", "pill done", `根拠のリンク${links.length}件はすべて検索結果にあります`);
-  const pill = el("span", "pill failed", `根拠のリンク${links.length}件のうち${missing.size}件は検索結果にありません`);
-  pill.title = "印の付いたリンクは、所員の検索結果に出てこなかったURLです";
-  return pill;
+  const key = (url) => url.replace(/[.,;:!?]+$/, "").replace(/\/+$/, "");
+  const numbers = new Map(links.map((l, i) => [key(l.url), i + 1]));
+  for (const a of answer.querySelectorAll("a")) {
+    const n = numbers.get(key(a.getAttribute("href")));
+    if (!n) continue;
+    const link = links[n - 1];
+    // URLがそのまま書かれていたら番号に置き換え、文字のリンクなら番号を後ろに添える
+    let mark = a;
+    if (a.textContent === a.getAttribute("href")) a.textContent = `[${n}]`;
+    else a.after((mark = Object.assign(el("a", "", `[${n}]`), { href: a.href, target: "_blank", rel: "noopener noreferrer" })));
+    mark.classList.add("cite");
+    mark.title = link.found
+      ? [link.title, link.source].filter(Boolean).join(" · ") || link.url
+      : "所員の検索結果にないリンクです。LLMが作ったURLかもしれません";
+    if (!link.found) mark.classList.add("unverified");
+  }
+
+  const missing = links.filter((l) => !l.found).length;
+  const box = el("details", "citations");
+  box.open = true;
+  const summary = el("summary", "", `出典 ${links.length}件`);
+  if (missing) summary.append(el("span", "pill failed", `${missing}件は検索結果にありません`));
+  const list = el("ol", "citation-list");
+  for (const link of links) {
+    const item = el("li", link.found ? "" : "unverified");
+    const a = el("a", "", link.title || link.url);
+    a.href = link.url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    const meta = link.found ? [link.source, link.date].filter(Boolean).join(" · ") : "検索結果にありません（LLMが作ったURLかもしれません）";
+    item.append(a, el("span", "citation-meta", meta));
+    if (link.title) item.append(el("span", "citation-url", link.url));
+    list.append(item);
+  }
+  box.append(summary, list);
+  return box;
 }
 
 // 調査中の表示。所員ごとの状態と、届いた分の回答を出す
