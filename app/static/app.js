@@ -1400,10 +1400,13 @@ function highlightCurrent() {
 function turnView(question, index, { images = [], imageText = "", followup = false, since = "", imageCount = 0 } = {}) {
   const node = el("section", "turn");
   node.dataset.index = index;
+  // 質問の元の文章（作り直すときに使う。画面の吹き出しは貼ったファイルを整えて出すので、文字が違う）
+  node.question = question;
   node.images = images;
   node.followup = followup || Boolean(since);
   const block = el("div", "question-block");
-  const bubble = el("div", "question", question);
+  const bubble = el("div", "question");
+  bubble.append(...questionNodes(question));
   // 貼ったログなどで長い質問は、たたんでおく
   let more = null;
   if (question.length > 600 || question.split("\n").length > 12) {
@@ -1437,6 +1440,22 @@ function turnView(question, index, { images = [], imageText = "", followup = fal
   if (imageText) block.append(imageTextView(imageText));
   node.append(block);
   return node;
+}
+
+// 質問の文章。貼ったファイル（```` で囲んだ部分）だけは等幅で出す。ほかは書いたとおりに出す
+function questionNodes(text) {
+  const nodes = [];
+  let at = 0;
+  for (const m of text.matchAll(/^(`{3,})([^\n]*)\n([\s\S]*?)\n\1$/gm)) {
+    nodes.push(text.slice(at, m.index).replace(/\n+$/, ""));
+    const pre = el("pre", "question-code");
+    if (m[2].trim()) pre.append(el("span", "question-code-name", m[2].trim()));
+    pre.append(m[3]);
+    nodes.push(pre);
+    at = m.index + m[0].length;
+  }
+  nodes.push(text.slice(at).replace(/^\n+/, ""));
+  return nodes.filter((n) => n !== "");
 }
 
 function followupLabel(since) {
@@ -1541,7 +1560,7 @@ function clarifyView({ agent, content }, index) {
   const skip = el("button", "", "聞き返さずに調べる");
   skip.type = "button";
   skip.title = "今の質問のまま、所員に調べさせます";
-  skip.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").querySelector(".question").textContent, index, true));
+  skip.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index, true));
   const actions = el("div", "answer-actions");
   actions.append(skip);
   body.append(markdownView(content), note, actions);
@@ -1557,7 +1576,7 @@ function chatView({ agent, content, model, seconds, llm_calls, trace_id }, index
   const regenerate = el("button", "", "作り直す");
   regenerate.type = "button";
   regenerate.title = "同じ頼みでもう一度答えてもらう（今選んでいる調べる場所で）";
-  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").querySelector(".question").textContent, index));
+  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index));
   actions.append(regenerate);
   if (trace_id) {
     const button = el("button", "", `LLMとのやりとり（${llm_calls}回）`);
@@ -1593,7 +1612,7 @@ function answerView(turn, index) {
   const regenerate = el("button", "", "作り直す");
   regenerate.type = "button";
   regenerate.title = "同じ質問でもう一度調べる";
-  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").querySelector(".question").textContent, index));
+  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index));
   actions.append(regenerate);
   const followup = el("button", "followup-ask", "その後どうなった？");
   followup.type = "button";
