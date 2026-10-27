@@ -3,7 +3,7 @@
 API:
   GET    /api/config
   GET    /api/conversations?q=&archived=1&folder= 会話一覧。q は空白区切りのANDで、タイトルと中身を探す。folder でフォルダを絞る
-  PATCH  /api/conversations/{id}          {title?, archived?, folder_id?} 名前・アーカイブ・フォルダを変える（folder_id: null でフォルダの外へ）
+  PATCH  /api/conversations/{id}          {title?, archived?, folder_id?, unread?} 名前・アーカイブ・フォルダ・未読の印を変える（folder_id: null でフォルダの外へ）
   POST   /api/conversations               {content, sources, folder_id?, images?} 新しい会話を作って最初の質問をする
   GET    /api/folders                     フォルダの一覧
   POST   /api/folders                     {name} フォルダを作る
@@ -18,7 +18,8 @@ API:
                                           画像を送らずにやり直したときは、元の質問の画像を使う
   GET    /api/images/{id}                 質問に添えられた画像
   DELETE /api/conversations/{id}
-  POST   /api/turns/{turn_id}/cancel        調査中のターンを中止する（turn_id は start イベントで届く）
+  POST   /api/turns/{turn_id}/cancel        調査中のターンを中止する
+  GET    /api/events                      調査の進み具合（NDJSON。つないでいる間ずっと流れる）
   GET    /api/characters                  所長と所員（使えるソースの分）
   PUT    /api/characters/{key}            {name, persona} キャラクターを編集する。key は "director" かソースID
   DELETE /api/characters/{key}            キャラクターを既定に戻す
@@ -35,8 +36,10 @@ images は質問に添える画像（data URL の配列。4枚・1枚5MBまで�
 sources は検索に使うソースIDの配列。scopes は {ソースID: [リポジトリやチャンネルの名前]}（省略可。ないソースは絞らない）。
 selection は入力欄の選択を覚えておく形 {"unchecked": [外したソースID], "scopes": {ソースID: [名前]}}。
 
-質問するPOSTは、進み具合をNDJSON（1行1イベント）で逐次返す。
-  {"type": "start", "turn_id"}                  調査を始めた。中止するときに turn_id を使う
+質問するPOSTは、調査を始めて {turn_id, conversation_id} をすぐ返す（同じ会話で調査中なら400）。
+調査は画面を閉じても最後まで続き、進み具合は /api/events に1行1イベントで流れる（app/jobs.py）。
+つないだときは、調査中のものを始めから流し直す。どのイベントも turn_id を持つ。
+  {"type": "job", "conversation_id", "title", "question", "index", "replace", "followup", "image_count", "started_at"}  調査を始めた
   {"type": "images_start", "agent", "count"}    所長が添えられた画像を読んでいる
   {"type": "intake_start", "agent"}             所長が依頼を受け付けている（曖昧なら聞き返す）
   {"type": "member_start", "source", "agent"}   所員が調査を始めた
@@ -46,9 +49,11 @@ selection は入力欄の選択を覚えておく形 {"unchecked": [外したソ
   {"type": "followup", "source", "agent", "instruction"}  所長が所員に再調査を頼んだ（続いて member_start 〜 member_done が来る）
   {"type": "delta", "text"}                    所長の回答の続き（director_start で書き直しになる）
   {"type": "memo_start", "agent"}               所長がメモに書き足すことを考えている
-  {"type": "done", "conversation_id", "question", "turn"}  質問と回答のターン（保存済み）
-  {"type": "cancelled"}                         中止した（何も保存しない。新しい会話なら会話ごと消す）
-  {"type": "error", "message"}
+  {"type": "done", "conversation_id", "question", "turn"}  質問と回答のターン（保存済み。会話には未読の印が付く）
+  {"type": "cancelled", "conversation_id", "deleted"}  中止した（何も保存しない。新しい会話なら会話ごと消す: deleted）
+  {"type": "error", "conversation_id", "deleted", "message"}
+  {"type": "ready"}                             つないだときに、調査中のものを流し終えた（turn_id なし）
+  {"type": "ping"}                              何もないときにときどき来る（turn_id なし）
 入力の検証で弾くときは、ストリームを始める前に通常のJSONで400を返す。
 """
 
@@ -59,14 +64,13 @@ import re
 import threading
 import traceback
 import urllib.parse
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import base64
 
-from app import agent, characters, db, models, sources
+from app import agent, characters, db, jobs, models, sources
 from app.sources import mcp_servers
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -78,6 +82,8 @@ MEMO_LENGTH = 2000
 # 質問に添えられる画像の枚数と大きさ
 IMAGE_COUNT = 4
 IMAGE_SIZE = 5 * 1024 * 1024
+# 進み具合のストリームで、何もないときに書く間隔（秒）
+EVENTS_PING = 15
 IMAGE_URL = re.compile(r"data:(image/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)")
 
 
@@ -153,6 +159,8 @@ def conversation_changes(req: dict) -> dict:
         changes["archived"] = bool(req["archived"])
     if "folder_id" in req:
         changes["folder_id"] = _folder_id(req["folder_id"])
+    if "unread" in req:
+        changes["unread"] = bool(req["unread"])
     return changes
 
 
@@ -208,10 +216,6 @@ def memos_for(conv_id: str | None, folder_id: str | None) -> dict:
         folder_id = (db.get_conversation(conv_id) or {}).get("folder_id")
     folder = db.get_folder(folder_id) if folder_id else None
     return {"global": db.get_setting("memo", ""), "folder": {"name": folder["name"], "memo": folder["memo"]} if folder else None}
-
-
-# 調査中のターン。turn_id → 中止の合図
-RUNNING: dict[str, threading.Event] = {}
 
 
 def config() -> dict:
@@ -297,6 +301,8 @@ class Handler(BaseHTTPRequestHandler):
         query = dict(urllib.parse.parse_qsl(url.query))
         if self.path == "/api/config":
             return self._send_json(200, config())
+        if self.path == "/api/events":
+            return self._stream_events()
         if url.path == "/api/conversations":
             convs = db.list_conversations(query.get("q", ""), query.get("archived") == "1", query.get("folder") or None)
             return self._send_json(200, convs)
@@ -349,7 +355,7 @@ class Handler(BaseHTTPRequestHandler):
             folder_id = _folder_id(req.get("folder_id"))
             images = _images(req.get("images"))
             conv_id = db.create_conversation(req["content"][:TITLE_LENGTH], folder_id)
-            return self._stream_turn(
+            return self._start_turn(
                 conv_id, [], req["content"], selected, scopes, is_new=True, clarify=not req.get("skip_clarify"), images=images
             )
         if m := re.fullmatch(r"/api/conversations/(\w+)/messages", self.path):
@@ -373,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
             since = None
             if req.get("followup"):
                 since = followup_since(history, db.get_conversation(m[1]))
-            return self._stream_turn(
+            return self._start_turn(
                 m[1],
                 history,
                 req["content"],
@@ -396,8 +402,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/check":
             return self._send_json(200, check())
         if m := re.fullmatch(r"/api/turns/(\w+)/cancel", self.path):
-            if cancel := RUNNING.get(m[1]):
-                cancel.set()
+            if job := jobs.get(m[1]):
+                job.cancel.set()
             return self._send_json(200, {})
         self.send_error(404)
 
@@ -435,6 +441,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _delete(self):
         if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
+            # 調べている途中なら止める（保存先がなくなるので）
+            for job in jobs.running():
+                if job.conversation_id == m[1]:
+                    job.cancel.set()
             db.delete_conversation(m[1])
             return self._send_json(200, {})
         if m := re.fullmatch(r"/api/mcp/(\w+)", self.path):
@@ -450,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, character_list())
         self.send_error(404)
 
-    def _stream_turn(
+    def _start_turn(
         self,
         conv_id: str,
         history: list[dict],
@@ -464,21 +474,30 @@ class Handler(BaseHTTPRequestHandler):
         image_ids: list[str] | None = None,
         since: str | None = None,
     ):
-        """調査を別スレッドで走らせ、キューに溜まったイベントを1行ずつ書き出す。
+        """調査を別スレッドで始めて、すぐに {turn_id, conversation_id} を返す。進み具合は /api/events で配る。
 
-        所員は並列で動くので、レスポンスへの書き込みはこのスレッドだけで行う。
         images は質問に添えられた画像。調査が成功したときだけ保存する（image_ids があれば、保存済みの同じ画像）。
         since は続報を調べるときの前回の調査日（followup_since）。
         """
-        events: queue.Queue[dict | None] = queue.Queue()
-        turn_id = uuid.uuid4().hex
-        cancel = RUNNING[turn_id] = threading.Event()
+        info = {
+            "title": (db.get_conversation(conv_id) or {}).get("title", ""),
+            "question": question,
+            # 質問のターンの位置。やり直しなら、そこから後が置き換わる
+            "index": len(history),
+            "replace": replace_from is not None,
+            "followup": since is not None,
+            "image_count": len(images or []),
+        }
+        try:
+            job = jobs.start(conv_id, info)
+        except jobs.Busy:
+            raise InputError("この調査はまだ調べています。終わるか中止してから質問してください")
 
         def emit(event: dict):
             # 中止されたら、次にイベントを出そうとしたところで調査を止める
-            if cancel.is_set():
+            if job.cancel.is_set():
                 raise agent.Cancelled
-            events.put(event)
+            jobs.publish(job, event)
 
         def work():
             try:
@@ -498,34 +517,43 @@ class Handler(BaseHTTPRequestHandler):
                     db.append_turns(conv_id, new_turns)
                 else:
                     db.replace_turns(conv_id, replace_from, new_turns)
-                events.put({"type": "done", "conversation_id": conv_id, "question": asked, "turn": turn})
+                # 画面で読むまで、一覧に印を出す（見ている画面が読んだら外す）
+                db.update_conversation(conv_id, unread=True)
+                jobs.publish(job, {"type": "done", "conversation_id": conv_id, "question": asked, "turn": turn})
             except agent.Cancelled:
                 if is_new:
                     db.delete_conversation(conv_id)
-                events.put({"type": "cancelled"})
+                jobs.publish(job, {"type": "cancelled", "conversation_id": conv_id, "deleted": is_new})
             except Exception as e:
                 traceback.print_exc()
                 if is_new:
                     db.delete_conversation(conv_id)
-                events.put({"type": "error", "message": f"{type(e).__name__}: {e}"})
-            finally:
-                RUNNING.pop(turn_id, None)
-                events.put(None)
+                jobs.publish(job, {"type": "error", "conversation_id": conv_id, "deleted": is_new, "message": f"{type(e).__name__}: {e}"})
 
-        events.put({"type": "start", "turn_id": turn_id})
         threading.Thread(target=work, daemon=True).start()
+        return self._send_json(200, {"turn_id": job.turn_id, "conversation_id": conv_id})
 
-        # Content-Length を付けず、書き終えたら接続を閉じる（HTTP/1.0）
+    def _stream_events(self):
+        """調査の進み具合を、つないでいる間ずっと1行1イベントで流す。調査中のものは溜めた分から流す。"""
+        q = jobs.subscribe()
+        # Content-Length を付けず、閉じられるまで書き続ける（HTTP/1.0）
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        while (event := events.get()) is not None:
-            try:
+        try:
+            while True:
+                try:
+                    event = q.get(timeout=EVENTS_PING)
+                except queue.Empty:
+                    # 画面が閉じられたことに気づけるよう、ときどき書く
+                    event = {"type": "ping"}
                 self.wfile.write(json.dumps(event, ensure_ascii=False).encode() + b"\n")
                 self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                # ブラウザが閉じられても調査と保存は最後まで続ける
-                return
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            jobs.unsubscribe(q)
 
 
 if __name__ == "__main__":

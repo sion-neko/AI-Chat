@@ -162,6 +162,31 @@ button.quiet:hover { color: var(--ink); background: var(--shelf); }
 
 .conv-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
+/* 調査中（点滅）と、まだ見ていない回答（点） */
+.conv-state { flex-shrink: 0; width: 8px; height: 8px; margin-left: auto; border-radius: 50%; align-self: center; }
+
+.conv-state.running {
+  width: auto;
+  height: auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  line-height: 1.7;
+  color: var(--busy);
+  background: var(--busy-soft);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse { 50% { opacity: 0.55; } }
+
+.conv-state.unread { background: var(--accent); }
+
+.conv.unread .conv-name { font-weight: bold; }
+
+@media (prefers-reduced-motion: reduce) {
+  .conv-state.running { animation: none; }
+}
+
 .archive-toggle { width: 100%; font-size: var(--text-xs); }
 
 .sidebar.archive-mode .conversations::before {
@@ -961,3 +986,38 @@ dialog.wide { width: min(900px, calc(100vw - 32px)); }
 .scope-choice:hover { background: var(--shelf); }
 
 .clarify-note { margin-top: 6px; font-size: var(--text-sm); color: var(--muted); }
+
+/* 回答が届いたときの知らせ（右上。入力欄と送信ボタンを隠さない） */
+.toasts {
+  position: fixed;
+  top: 68px;
+  right: 16px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(360px, calc(100vw - 32px));
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.12);
+  animation: toast-in 0.2s ease-out;
+}
+
+.toast-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--text-sm); }
+
+.toast-text span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
+}
