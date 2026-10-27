@@ -2,6 +2,7 @@
 
 会話はターン単位のJSONで保存する。
   user:      {"role": "user", "content": ...}
+             images: [画像ID]（images テーブル）、image_text: 画像を文字に起こしたもの（添えられたときだけ）
   assistant: {"role": "assistant", "agent", "content", "model", "reports": [所員の報告（検索の過程も含む）]}
              再調査の報告は request（所長からの依頼）を持ち、最初の報告の後ろに並ぶ
              links: [{"url", "found"}] 回答のリンクが検索結果にあったか（app/links.py）
@@ -36,6 +37,13 @@ CREATE TABLE IF NOT EXISTS conversations (
     updated_at TEXT NOT NULL,
     archived   INTEGER NOT NULL DEFAULT 0,
     folder_id  TEXT REFERENCES folders(id) ON DELETE SET NULL
+);
+-- 質問に添えられた画像。会話のターンには id だけを持たせる
+CREATE TABLE IF NOT EXISTS images (
+    id              TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    mime            TEXT NOT NULL,
+    data            BLOB NOT NULL
 );
 -- 全体の設定（値はJSON）。memo: すべての調査に効くメモ、selection: フォルダの外で入力欄に選んだソースと範囲
 CREATE TABLE IF NOT EXISTS settings (
@@ -204,6 +212,23 @@ def delete_folder(folder_id: str):
     """フォルダを消す。中の調査は消さず、フォルダの外に出す。"""
     with connect() as conn:
         conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+
+
+# ---- 画像 ----
+
+
+def save_image(conv_id: str, mime: str, data: bytes) -> str:
+    image_id = uuid.uuid4().hex
+    with connect() as conn:
+        conn.execute("INSERT INTO images VALUES (?, ?, ?, ?)", (image_id, conv_id, mime, data))
+    return image_id
+
+
+def load_image(image_id: str) -> tuple[str, bytes] | None:
+    """(MIMEタイプ, バイト列)。なければ None。"""
+    with connect() as conn:
+        row = conn.execute("SELECT mime, data FROM images WHERE id = ?", (image_id,)).fetchone()
+        return (row["mime"], bytes(row["data"])) if row else None
 
 
 # ---- 全体の設定 ----

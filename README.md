@@ -89,5 +89,15 @@ python scripts/make_dist.py --env dist.env   # → dist/ai-chat-YYYYMMDD.zip
 `.env` の `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` を書き換えて `docker compose up -d`（例は `.env.example`）。
 エンドポイントは OpenAI互換（`/v1/chat/completions` + `tools`）であることを前提にしている。
 
+### 画像を読めるモデル
+
+画像を読めるかどうかは、`LLM_MODEL` から `app/models.json` の対応表で自動で決まる（設定で切り替えるものではない）。
+表にないモデルは画像を読めないものとして扱うので、使うモデルが画像を読めるなら表に1行足す（上から順に照らし、最初に合った行を使う。`*` は任意の文字列）。
+
+画像を読めるモデルのときは:
+
+- 入力欄に画像を添えられる（貼り付け・ドラッグ・「画像を添える」。4枚・1枚5MBまで。長い辺が1600pxより大きい画像は縮めて送る）。所長が調べる前に1回だけ読んで文字に起こし、所員にはその文字を渡す
+- 所員が検索結果の中の画像（Zulip・GitHub・GitLab に貼られた画像）を、必要なときだけ自分のトークンで取ってきて読む（1回の調査で3枚まで）。GitLab の画像は API（GitLab 17.4 以降）で取る
+
 > ローカルLLM構成での実データ確認は、Claude Code を通さず本人が行う（SPEC の制約）。
 > `data/chat.db` にも実データの検索結果が入るので、Claude Code に読ませない。

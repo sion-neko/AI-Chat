@@ -126,12 +126,25 @@ def scopes() -> list[str]:
     return sorted(s["name"] for s in _get("/users/me/subscriptions", {})["subscriptions"])
 
 
+def fetch_image(url: str) -> tuple[bytes, str]:
+    """メッセージに貼られた画像（/user_uploads/...）を取ってくる。
+
+    アップロードされたファイルはログインしないと見られないので、APIで一時的なURLをもらってから取る。
+    """
+    path = url.removeprefix(_base_url())
+    if not path.startswith("/user_uploads/"):
+        raise http.ApiError("Zulipに貼られた画像（/user_uploads/... のURL）ではありません")
+    temporary = _get(path, {})["url"]
+    return http.get_image(f"{_base_url()}{temporary}")
+
+
 ZULIP = Source(
     id="zulip",
     label="Zulip",
     tools=[search_zulip, get_zulip_topic],
     configured=all(os.environ.get(k) for k in ("ZULIP_URL", "ZULIP_EMAIL", "ZULIP_API_KEY")),
     requires="ZULIP_URL, ZULIP_EMAIL, ZULIP_API_KEY",
+    fetch_image=fetch_image,
     check=check,
     scopes=scopes,
     scope_label="チャンネル",

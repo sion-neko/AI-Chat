@@ -106,16 +106,21 @@ let running = null; // { turnId, cancelling }
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   if (running) return cancelTurn();
-  const content = input.value.trim();
+  const images = attachments;
+  // 画像だけを添えて送ったときは、画像について調べてもらう
+  const content = input.value.trim() || (images.length ? "この画像について、関係する話を調べて" : "");
   if (!content) return;
   input.value = "";
   autosize();
-  ask(content, null);
+  attachments = [];
+  renderAttachments();
+  ask(content, null, false, images);
 });
 
 // 質問して調査させる。fromTurn（質問のターンの位置）があれば、そこから後をやり直す
 // skipClarify なら所長は聞き返さずに調べる
-async function ask(content, fromTurn, skipClarify = false) {
+// images は新しく添える画像（data URL）。shownImages は質問に並べて見せる画像（やり直しでは元の質問の画像）
+async function ask(content, fromTurn, skipClarify = false, images = [], shownImages = images) {
   if (document.getElementById("empty")) {
     log.replaceChildren();
     renderHead({ title: content });
@@ -125,7 +130,7 @@ async function ask(content, fromTurn, skipClarify = false) {
     for (const node of [...log.querySelectorAll(".turn")].filter((n) => Number(n.dataset.index) >= fromTurn)) node.remove();
   }
   const index = fromTurn ?? turnCount;
-  const turn = append(turnView(content, index));
+  const turn = append(turnView(content, index, { images: shownImages }));
 
   const progress = progressView();
   turn.append(progress.node);
@@ -137,6 +142,7 @@ async function ask(content, fromTurn, skipClarify = false) {
     if (!currentId && viewFolderId) body.folder_id = viewFolderId;
     if (fromTurn !== null) body.from_turn = fromTurn;
     if (skipClarify) body.skip_clarify = true;
+    if (images.length) body.images = images;
     let result = null;
     await streamTurn(path, body, (event) => {
       if (event.type === "error") throw new Error(event.message);
@@ -148,12 +154,13 @@ async function ask(content, fromTurn, skipClarify = false) {
     if (result.type === "cancelled") {
       // 何も保存されていないので、質問ごと消して入力欄に戻す
       turn.remove();
-      restoreQuestion(content);
+      restoreQuestion(content, images);
       if (fromTurn !== null) await openConversation(currentId);
       else if (!log.children.length) showEmpty();
       return;
     }
     progress.node.replaceWith(answerView(result.turn, index));
+    if (result.question.image_text) turn.querySelector(".question-block").append(imageTextView(result.question.image_text));
     turnCount = index + 2;
     setPlaceholder(result.turn);
     if (!currentId) {
@@ -163,7 +170,7 @@ async function ask(content, fromTurn, skipClarify = false) {
     }
   } catch (err) {
     progress.node.replaceWith(el("p", "error-text", `調査できませんでした: ${err.message}`));
-    restoreQuestion(content);
+    restoreQuestion(content, images);
   } finally {
     running = null;
     setSendButton();
@@ -184,12 +191,110 @@ function setSendButton() {
   send.disabled = Boolean(running?.cancelling);
 }
 
-// 聞き直せるよう、質問を入力欄に戻す（入力中の文章があれば上書きしない）
-function restoreQuestion(content) {
+// 聞き直せるよう、質問と添えた画像を入力欄に戻す（入力中の文章や画像があれば上書きしない）
+function restoreQuestion(content, images = []) {
+  if (!attachments.length && images.length) {
+    attachments = images;
+    renderAttachments();
+  }
   if (input.value.trim()) return;
   input.value = content;
   autosize();
 }
+
+// ---- 質問に添える画像 ----
+
+const IMAGE_COUNT = 4; // サーバーの上限（web.IMAGE_COUNT）と同じ
+const IMAGE_SIDE = 1600; // これより大きい画像は縮めて送る（LLMの負荷を減らす）
+const IMAGE_DATA_LENGTH = 6_500_000; // data URL の長さの目安（5MB の画像）
+const attachBox = document.getElementById("attachments");
+const attachButton = document.getElementById("attach");
+const attachFile = document.getElementById("attach-file");
+const composerStatus = document.getElementById("composer-status");
+// 添えた画像（data URL）
+let attachments = [];
+// 今のモデルが画像を読めるか（設定から）
+let visionEnabled = false;
+
+function showComposerStatus(text) {
+  composerStatus.textContent = text;
+  setTimeout(() => composerStatus.textContent === text && (composerStatus.textContent = ""), 4000);
+}
+
+async function addImages(files) {
+  const images = [...files].filter((f) => f.type.startsWith("image/"));
+  if (!images.length) return;
+  if (!visionEnabled) return showComposerStatus("今のモデルは画像を読めません");
+  for (const file of images) {
+    if (attachments.length >= IMAGE_COUNT) {
+      showComposerStatus(`画像は${IMAGE_COUNT}枚までです`);
+      break;
+    }
+    try {
+      attachments.push(await shrinkImage(file));
+    } catch {
+      showComposerStatus("画像を読み込めませんでした");
+    }
+  }
+  renderAttachments();
+}
+
+// 長い辺を IMAGE_SIDE までに縮め、data URL にする。スクリーンショットの文字が潰れないよう、PNGはPNGのまま
+async function shrinkImage(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, IMAGE_SIDE / Math.max(bitmap.width, bitmap.height));
+  const canvas = Object.assign(document.createElement("canvas"), {
+    width: Math.round(bitmap.width * scale),
+    height: Math.round(bitmap.height * scale),
+  });
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  const type = ["image/png", "image/jpeg", "image/webp"].includes(file.type) ? file.type : "image/png";
+  const url = canvas.toDataURL(type, 0.9);
+  return url.length <= IMAGE_DATA_LENGTH ? url : canvas.toDataURL("image/jpeg", 0.85);
+}
+
+function renderAttachments() {
+  attachBox.hidden = !attachments.length;
+  attachBox.replaceChildren(
+    ...attachments.map((url, i) => {
+      const item = el("div", "attachment");
+      const img = Object.assign(el("img"), { src: url, alt: `添えた画像${i + 1}` });
+      const remove = el("button", "attachment-remove", "×");
+      remove.type = "button";
+      remove.title = "外す";
+      remove.addEventListener("click", () => {
+        attachments.splice(i, 1);
+        renderAttachments();
+      });
+      item.append(img, remove);
+      return item;
+    }),
+  );
+}
+
+attachButton.addEventListener("click", () => attachFile.click());
+attachFile.addEventListener("change", () => {
+  addImages(attachFile.files);
+  attachFile.value = "";
+});
+input.addEventListener("paste", (e) => {
+  const files = [...e.clipboardData.files].filter((f) => f.type.startsWith("image/"));
+  if (!files.length) return;
+  e.preventDefault();
+  addImages(files);
+});
+form.addEventListener("dragover", (e) => {
+  if (![...e.dataTransfer.types].includes("Files")) return;
+  e.preventDefault();
+  form.classList.add("dragging");
+});
+form.addEventListener("dragleave", () => form.classList.remove("dragging"));
+form.addEventListener("drop", (e) => {
+  form.classList.remove("dragging");
+  if (!e.dataTransfer.files.length) return;
+  e.preventDefault();
+  addImages(e.dataTransfer.files);
+});
 
 // ---- 設定とソース ----
 
@@ -199,6 +304,9 @@ let sourceList = [];
 async function loadConfig() {
   const c = await api("GET", "/api/config");
   document.getElementById("model").textContent = c.model;
+  document.getElementById("model").title = c.vision ? "設定中のモデル（画像を読める）" : "設定中のモデル";
+  visionEnabled = c.vision;
+  attachButton.hidden = !c.vision;
   directorName = c.director;
   sourceList = c.sources;
   sourceLabels = new Map(c.sources.map((s) => [s.id, s.label]));
@@ -421,7 +529,10 @@ async function openConversation(id) {
   renderHead();
   const nodes = [];
   data.turns.forEach((t, i) => {
-    if (t.role === "user") nodes.push(turnView(t.content, i));
+    if (t.role === "user") {
+      const images = (t.images ?? []).map((id) => `/api/images/${id}`);
+      nodes.push(turnView(t.content, i, { images, imageText: t.image_text }));
+    }
     else nodes.at(-1).append(answerView(t, i - 1));
   });
   turnCount = data.turns.length;
@@ -709,9 +820,12 @@ function highlightCurrent() {
 
 // 1往復分の入れ物。質問を出し、回答はあとから足す
 // index は質問のターンの位置。やり直すときにサーバーへ渡す
-function turnView(question, index) {
+// images は質問に添えた画像のURL、imageText はそれを所長が文字に起こしたもの
+function turnView(question, index, { images = [], imageText = "" } = {}) {
   const node = el("section", "turn");
   node.dataset.index = index;
+  node.images = images;
+  const block = el("div", "question-block");
   const bubble = el("div", "question", question);
   const edit = el("button", "question-edit", "編集");
   edit.type = "button";
@@ -719,8 +833,26 @@ function turnView(question, index) {
   edit.addEventListener("click", () => editQuestion(node, question, index));
   const row = el("div", "question-row");
   row.append(edit, bubble);
-  node.append(row);
+  block.append(row);
+  if (images.length) {
+    const gallery = el("div", "question-images");
+    for (const src of images) {
+      const link = Object.assign(el("a"), { href: src, target: "_blank", rel: "noopener" });
+      link.append(Object.assign(el("img"), { src, alt: "添えた画像" }));
+      gallery.append(link);
+    }
+    block.append(gallery);
+  }
+  if (imageText) block.append(imageTextView(imageText));
+  node.append(block);
   return node;
+}
+
+// 添えた画像から所長が読み取った内容。読み違いに気づけるよう、たたんで出しておく
+function imageTextView(text) {
+  const details = el("details", "image-text");
+  details.append(el("summary", "", "画像から読み取った内容"), el("div", "image-text-body", text));
+  return details;
 }
 
 // より後のやりとりが消えるときは確かめる
@@ -729,9 +861,14 @@ function confirmRedo(index) {
   return confirm("この質問より後のやりとりは消えます。調べ直しますか？");
 }
 
+// 画像はサーバーが元の質問のものを使い直すので、送らずに見せるだけ
 function redo(content, index, skipClarify = false) {
   if (running || !confirmRedo(index)) return;
-  ask(content, index, skipClarify);
+  ask(content, index, skipClarify, [], turnImages(index));
+}
+
+function turnImages(index) {
+  return log.querySelector(`.turn[data-index="${index}"]`)?.images ?? [];
 }
 
 // 所長が聞き返しているときは、答えを書く欄だと分かるようにする（元の文言は最初に1度だけ覚える）
@@ -761,7 +898,7 @@ function editQuestion(node, question, index) {
     const content = field.value.trim();
     if (!content) return;
     if (running || !confirmRedo(index)) return;
-    ask(content, index);
+    ask(content, index, false, [], node.images);
   });
   field.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -938,7 +1075,9 @@ function progressView() {
   };
 
   const update = (event) => {
-    if (event.type === "intake_start") {
+    if (event.type === "images_start") {
+      meta.textContent = `添えられた画像（${event.count}枚）を読んでいます…`;
+    } else if (event.type === "intake_start") {
       meta.textContent = "依頼の内容を確かめています…";
     } else if (event.type === "member_start") {
       record.hidden = false;

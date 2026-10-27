@@ -19,3 +19,6 @@ class Source:
     scopes: Callable[[], list[str]] | None = None
     # 検索範囲の呼び名（「リポジトリ」など）
     scope_label: str = ""
+    # 検索結果に出てくる画像のURLから、画像を取ってくる（バイト列, MIMEタイプ）。取れないなら ApiError
+    # 画像を読めるモデルのときだけ、所員の view_image ツールが使う
+    fetch_image: Callable[[str], tuple[bytes, str]] | None = None

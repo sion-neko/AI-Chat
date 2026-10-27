@@ -7,6 +7,7 @@
 """
 
 import os
+import urllib.parse
 
 from langchain_core.tools import tool
 
@@ -115,6 +116,18 @@ def scopes() -> list[str]:
     return [r["full_name"] for r in _get("/user/repos", {"sort": "pushed", "per_page": 100})]
 
 
+# Issue等に貼られた画像の置き場所。トークンを付けて取りに行くのはここだけ（よそのサーバーにトークンを渡さない）
+IMAGE_HOSTS = {"github.com", "user-images.githubusercontent.com", "private-user-images.githubusercontent.com"}
+
+
+def fetch_image(url: str) -> tuple[bytes, str]:
+    """Issue・Pull Requestに貼られた画像を取ってくる（非公開リポジトリの画像はトークンが要る）。"""
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if host not in IMAGE_HOSTS | {urllib.parse.urlsplit(API_URL).hostname}:
+        raise http.ApiError("GitHubに貼られた画像のURLではありません")
+    return http.get_image(url, {"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}"})
+
+
 GITHUB = Source(
     id="github",
     label="GitHub",
@@ -124,4 +137,5 @@ GITHUB = Source(
     check=check,
     scopes=scopes,
     scope_label="リポジトリ",
+    fetch_image=fetch_image,
 )

@@ -48,10 +48,14 @@
     <main id="log" class="log"></main>
 
     <form id="form" class="composer">
+      <div id="attachments" class="attachments" hidden></div>
       <textarea id="input" rows="1" placeholder="聞きたいことを入力（Enterで送信 / Shift+Enterで改行）"></textarea>
       <div class="composer-bar">
         <span class="composer-label">調べる場所</span>
         <div id="sources" class="sources"></div>
+        <span id="composer-status" class="composer-status"></span>
+        <button id="attach" class="quiet attach" type="button" title="スクリーンショットなどの画像を添える（貼り付け・ドラッグでも添えられます）" hidden>画像を添える</button>
+        <input id="attach-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
         <button id="send" class="send" type="submit">調査を依頼</button>
       </div>
     </form>
