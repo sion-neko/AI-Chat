@@ -36,7 +36,7 @@ from pathlib import Path
 from app import agent, characters, db, sources
 
 STATIC_DIR = Path(__file__).parent / "static"
-CONTENT_TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript"}
+CONTENT_TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
 TITLE_LENGTH = 40
 
 

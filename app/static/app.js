@@ -10,6 +10,16 @@ const sourceBox = document.getElementById("sources");
 
 const characterDialog = document.getElementById("characters");
 
+// 外したソースはブラウザに覚えておく（新しく使えるようになったソースは選んだ状態で出す）
+const UNCHECKED_KEY = "unchecked-sources";
+
+// 最初の画面に出す質問の例
+const EXAMPLES = [
+  "監視サーバーのディスク増設ってどうなった？",
+  "VPN証明書の更新手順ってどこかにまとまってる？",
+  "先月あった障害対応の経緯を教えて",
+];
+
 loadConfig();
 refreshList();
 showEmpty();
@@ -18,8 +28,24 @@ document.getElementById("new-chat").addEventListener("click", () => {
   currentId = null;
   showEmpty();
   highlightCurrent();
+  closeSidebar();
   input.focus();
 });
+
+// 狭い画面では会話の一覧を重ねて開く
+const sidebar = document.getElementById("sidebar");
+document.getElementById("toggle-sidebar").addEventListener("click", (e) => {
+  e.stopPropagation();
+  sidebar.classList.toggle("open");
+});
+document.addEventListener("click", (e) => {
+  if (!sidebar.contains(e.target)) closeSidebar();
+});
+function closeSidebar() {
+  sidebar.classList.remove("open");
+}
+
+sourceBox.addEventListener("change", saveSourceSelection);
 
 document.getElementById("open-characters").addEventListener("click", async () => {
   renderCharacters(await api("GET", "/api/characters"));
@@ -79,18 +105,34 @@ async function loadConfig() {
   renderSources(c.sources);
 }
 
-// 選択状態は描き直しても保つ（初回はすべて選択）
 function renderSources(sources) {
-  const checked = sourceBox.querySelector("input") ? new Set(selectedSources()) : null;
+  const unchecked = loadUnchecked();
   for (const label of sourceBox.querySelectorAll("label")) label.remove();
   for (const s of sources) {
     const label = el("label", "source");
     const box = el("input");
     box.type = "checkbox";
     box.value = s.id;
-    box.checked = checked ? checked.has(s.id) : true;
+    box.checked = !unchecked.has(s.id);
     label.append(box, `${s.label}（${s.agent}）`);
     sourceBox.append(label);
+  }
+}
+
+function loadUnchecked() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(UNCHECKED_KEY)) || []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveSourceSelection() {
+  const unchecked = [...sourceBox.querySelectorAll("input:not(:checked)")].map((box) => box.value);
+  try {
+    localStorage.setItem(UNCHECKED_KEY, JSON.stringify(unchecked));
+  } catch {
+    // 保存できない環境（プライベートモード等）では毎回すべて選んだ状態になるだけ
   }
 }
 
@@ -150,6 +192,7 @@ async function openConversation(id) {
   );
   log.scrollTop = log.scrollHeight;
   highlightCurrent();
+  closeSidebar();
 }
 
 async function deleteConversation(id) {
@@ -294,8 +337,23 @@ function append(node) {
 }
 
 function showEmpty() {
-  const node = el("div", "empty", "「あの話ってどうなったっけ？」を聞いてください");
+  const node = el("div", "empty");
   node.id = "empty";
+  const logo = el("img", "empty-logo");
+  logo.src = "/static/ghost.svg";
+  logo.alt = "";
+  const examples = el("div", "examples");
+  for (const text of EXAMPLES) {
+    const chip = el("button", "example", text);
+    chip.type = "button";
+    chip.addEventListener("click", () => {
+      input.value = text;
+      autosize();
+      input.focus();
+    });
+    examples.append(chip);
+  }
+  node.append(logo, el("p", "", "「あの話ってどうなったっけ？」を聞いてください。所員がソースを手分けして調べます。"), examples);
   log.replaceChildren(node);
 }
 

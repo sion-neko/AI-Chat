@@ -4,17 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>おばけ探偵事務所</title>
+  <link rel="icon" href="/static/ghost.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <aside>
+  <aside id="sidebar">
     <button id="new-chat" type="button">＋ 新しい会話</button>
     <nav id="conversations"></nav>
   </aside>
 
   <div class="chat">
     <header>
-      <h1>おばけ探偵事務所</h1>
+      <button id="toggle-sidebar" class="icon-button" type="button" title="会話の一覧">☰</button>
+      <h1><img src="/static/ghost.svg" alt="" class="logo">おばけ探偵事務所</h1>
       <span id="model" class="model-badge" title="設定中のモデル">…</span>
       <button id="open-characters" class="header-button" type="button">キャラクター</button>
     </header>
@@ -26,7 +28,7 @@
     </fieldset>
 
     <form id="form">
-      <textarea id="input" rows="1" placeholder="メッセージを入力（Enterで送信 / Shift+Enterで改行）"></textarea>
+      <textarea id="input" rows="1" placeholder="質問を入力（Shift+Enterで改行）"></textarea>
       <button id="send" type="submit">送信</button>
     </form>
   </div>

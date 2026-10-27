@@ -77,6 +77,11 @@ nav { overflow-y: auto; }
 
 .conv:hover .conv-delete { visibility: visible; }
 
+/* タッチ端末ではホバーできないので、削除ボタンを常に出す */
+@media (hover: none) {
+  .conv-delete { visibility: visible; }
+}
+
 .chat {
   flex: 1;
   min-width: 0;
@@ -84,8 +89,22 @@ nav { overflow-y: auto; }
   flex-direction: column;
 }
 
+.icon-button { display: none; padding: 4px 10px; }
+
 @media (max-width: 640px) {
-  aside { display: none; }
+  aside {
+    display: none;
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 10;
+    box-shadow: 0 0 24px rgb(0 0 0 / 0.25);
+  }
+
+  aside.open { display: flex; }
+
+  .icon-button { display: inline-block; }
+
+  .model-badge { display: none; }
 }
 
 header {
@@ -96,7 +115,16 @@ header {
   border-bottom: 1px solid var(--border);
 }
 
-h1 { margin: 0; font-size: 16px; }
+h1 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 16px;
+  white-space: nowrap;
+}
+
+.logo { width: 26px; height: 26px; }
 
 .model-badge {
   font-family: ui-monospace, Consolas, monospace;
@@ -126,7 +154,24 @@ main {
   padding: 24px 16px;
 }
 
-.empty { text-align: center; color: var(--muted); margin-top: 20vh; }
+.empty { text-align: center; color: var(--muted); margin-top: 14vh; }
+
+.empty-logo { width: 88px; height: 88px; }
+
+.empty p { margin: 8px 0 16px; }
+
+.examples {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.example { border-radius: 999px; color: var(--fg); }
+
+.example:hover { border-color: var(--accent); }
 
 .msg {
   max-width: 820px;
