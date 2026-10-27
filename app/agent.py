@@ -28,6 +28,13 @@ from app.sources.http import ApiError
 
 Emit = Callable[[dict], None]
 
+
+class Cancelled(BaseException):
+    """調査が中止された。emit が投げる。
+
+    所員の失敗（except Exception）として握りつぶされず、ターン全体を止めるよう BaseException にしている。
+    """
+
 # 所員1人あたりのグラフのステップ上限（LLM呼び出しとツール実行の合計）。長引く調査を打ち切るため
 MEMBER_RECURSION_LIMIT = 12
 # 所長が再調査を頼める回数（1ターンあたり）。頼んだ報告を受けたら必ず回答する
@@ -144,6 +151,16 @@ def _followup_tool(sources: list[Source]) -> dict:
     }
 
 
+def _stream(llm, messages: list, emit: Emit) -> AIMessage:
+    """回答を受け取りながら、届いた文字を delta イベントで流す。ツール呼び出しも含めて全体をまとめて返す。"""
+    answer = None
+    for chunk in llm.stream(messages):
+        answer = chunk if answer is None else answer + chunk
+        if chunk.text:
+            emit({"type": "delta", "text": chunk.text})
+    return answer
+
+
 def run_director(
     director: characters.Character,
     history: list[dict],
@@ -170,7 +187,7 @@ def run_director(
     for round_ in range(FOLLOWUP_ROUNDS + 1):
         # 最後の回はツールを渡さず、回答させる
         llm = _llm.bind_tools([_followup_tool(sources)]) if round_ < FOLLOWUP_ROUNDS else _llm
-        answer = llm.invoke(messages)
+        answer = _stream(llm, messages, emit)
         if not answer.tool_calls:
             break
         messages.append(answer)
@@ -196,6 +213,16 @@ def run_director(
     # 設定値ではなく、LLMが実際に返したモデル名
     model = answer.response_metadata.get("model_name") or os.environ["LLM_MODEL"]
     return {"content": answer.text, "model": model, "followups": followups}
+
+
+def check_llm() -> dict:
+    """LLMに短い質問を1回送って、つながるか確かめる。結果は sources.check と同じ形。"""
+    try:
+        answer = _llm.invoke([HumanMessage("接続の確認です。「OK」とだけ返してください。")])
+    except Exception as e:
+        return {"state": "error", "message": f"{type(e).__name__}: {e}"}
+    model = answer.response_metadata.get("model_name") or os.environ["LLM_MODEL"]
+    return {"state": "ok", "message": f"{model} が応答しました"}
 
 
 def run_turn(history: list[dict], question: str, sources: list[Source], emit: Emit) -> dict:

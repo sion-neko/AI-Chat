@@ -97,9 +97,15 @@ def get_gitlab_item(project: str, iid: int, kind: Literal["issue", "merge_reques
     return item
 
 
+def check() -> str:
+    return f"{_get('/user')['username']} としてつながりました"
+
+
 GITLAB = Source(
     id="gitlab",
     label="GitLab",
     tools=[search_gitlab, get_gitlab_item],
     configured=bool(os.environ.get("GITLAB_URL") and os.environ.get("GITLAB_TOKEN")),
+    requires="GITLAB_URL, GITLAB_TOKEN",
+    check=check,
 )

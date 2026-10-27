@@ -8,6 +8,9 @@ services:
     ports:
       # 自分のPCからだけ開けるよう 127.0.0.1 に限定（LANに公開しない）
       - "127.0.0.1:8080:8080"
+    # 自分のPCで動かしているMCPサーバーに host.docker.internal でつなげるように（Docker Desktop 以外でも）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - mock-llm
 
