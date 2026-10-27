@@ -41,7 +41,7 @@
       <button id="archive" class="quiet" type="button" hidden>アーカイブ</button>
       <span id="model" class="model" title="設定中のモデル">…</span>
       <button id="open-memo" class="quiet" type="button">メモ</button>
-      <button id="open-status" class="quiet" type="button">接続確認</button>
+      <button id="open-status" class="quiet" type="button" title="接続確認とMCPサーバーの設定">ソース</button>
       <button id="open-characters" class="quiet" type="button">キャラクター</button>
     </header>
 
@@ -107,16 +107,56 @@
     <div id="character-list" class="character-list"></div>
   </dialog>
 
-  <dialog id="status">
+  <dialog id="status" class="wide">
     <div class="dialog-head">
-      <h2>接続確認</h2>
+      <h2>ソース</h2>
       <button id="close-status" class="close" type="button" title="閉じる">×</button>
     </div>
-    <p class="dialog-note">LLMと各ソースに実際につないで、設定が正しいか確かめます。設定は .env に書き、書き換えたらアプリを再起動します。</p>
-    <table id="status-table" class="status-table"></table>
-    <div class="dialog-actions">
-      <button id="run-check" class="primary" type="button">確認する</button>
-    </div>
+
+    <section class="dialog-section">
+      <div class="dialog-section-head">
+        <h3>接続確認</h3>
+        <button id="run-check" class="primary" type="button">確認する</button>
+      </div>
+      <p class="dialog-note">LLMと各ソースに実際につないで、設定が正しいか確かめます。LLM・GitHub・GitLab・Zulip の設定は .env に書き、書き換えたらアプリを再起動します。</p>
+      <table id="status-table" class="status-table"></table>
+    </section>
+
+    <section class="dialog-section">
+      <div class="dialog-section-head">
+        <h3>MCPサーバー</h3>
+        <button id="add-mcp" type="button">＋ 足す</button>
+      </div>
+      <p class="dialog-note">MCPサーバーを足すと、1台ずつ所員の担当になります。保存するとその場でつなぎ、再起動はいりません。設定は <code id="mcp-path"></code> に書かれます。</p>
+      <div id="mcp-list" class="mcp-list"></div>
+      <form id="mcp-form" class="mcp-form" hidden>
+        <h4 id="mcp-form-title">MCPサーバーを足す</h4>
+        <label class="field"><span>表示名（調べる場所の名前になります）</span><input id="mcp-label" maxlength="40" required placeholder="例）社内Wiki"></label>
+        <div class="mcp-kind">
+          <label><input type="radio" name="mcp-kind" value="url" checked> URLでつなぐ</label>
+          <label><input type="radio" name="mcp-kind" value="command"> コマンドで起動する</label>
+        </div>
+        <div id="mcp-url-fields" class="mcp-fields">
+          <label class="field"><span>URL</span><input id="mcp-url" placeholder="例）http://host.docker.internal:9000/mcp"></label>
+          <label class="field"><span>方式</span>
+            <select id="mcp-type"><option value="">Streamable HTTP</option><option value="sse">SSE</option></select>
+          </label>
+          <label class="field"><span>ヘッダー（1行に1つ「名前: 値」。トークンなど）</span><textarea id="mcp-headers" rows="2" placeholder="Authorization: Bearer xxxxx"></textarea></label>
+          <p class="dialog-note">自分のPCで動かしているサーバーには、localhost ではなく host.docker.internal でつなぎます（アプリはコンテナの中で動いているため）。</p>
+        </div>
+        <div id="mcp-command-fields" class="mcp-fields" hidden>
+          <label class="field"><span>コマンド</span><input id="mcp-command" placeholder="例）python"></label>
+          <label class="field"><span>引数（1行に1つ）</span><textarea id="mcp-args" rows="2" placeholder="/work/data/notes_server.py"></textarea></label>
+          <label class="field"><span>環境変数（1行に1つ「名前=値」）</span><textarea id="mcp-env" rows="2" placeholder="NOTES_DIR=/work/data/notes"></textarea></label>
+          <p class="dialog-note">コマンドはアプリのコンテナの中で動きます。コンテナに入っていないコマンド（npx など）は使えないので、手軽なのはURLでつなぐほうです。</p>
+        </div>
+        <div class="dialog-actions">
+          <span id="mcp-status" class="character-status"></span>
+          <button id="mcp-cancel" class="quiet" type="button">やめる</button>
+          <button id="mcp-save" class="primary" type="submit">保存してつなぐ</button>
+        </div>
+      </form>
+    </section>
   </dialog>
 
   <dialog id="scope">

@@ -1,5 +1,7 @@
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -23,6 +25,15 @@ def search_scoped(query: str) -> str:
 SCOPED = Source(id="scoped", label="範囲つき", tools=[search_scoped], configured=True, scopes=lambda: [], scope_label="リポジトリ")
 
 
+@tool
+def search_since(query: str) -> str:
+    """続報の日付を返すだけの検索ツール。"""
+    return f"以降: {scope.since(None)}"
+
+
+SINCE = Source(id="since", label="日付つき", tools=[search_since], configured=True)
+
+
 class FakeLLM:
     """ツールを渡されたかどうかと会話の中身から、決まった応答を返すLLM。"""
 
@@ -34,7 +45,7 @@ class FakeLLM:
         self.director_calls = 0
 
     def bind_tools(self, tools):
-        bound = FakeLLM.__new__(FakeLLM)
+        bound = type(self).__new__(type(self))
         bound.__dict__ = self.__dict__.copy()
         bound.tools = tools
         bound.parent = self
@@ -132,6 +143,23 @@ class AgentTest(unittest.TestCase):
         self.assertNotIn("scope", chat)
         prompt = next(c for c in turn["trace"] if c["who"].endswith("（範囲つき）"))["messages"][1]["content"]
         self.assertIn("検索範囲（リポジトリ）は次に絞られています: me/infra", prompt)
+
+    def test_followup_searches_only_after_previous_answer(self):
+        llm = FakeLLM([{"source": "since", "instruction": "もう一度"}], ask="どの件ですか？")
+        history = [{"role": "user", "content": "ディスク増設どうなった？"}, {"role": "assistant", "content": "来週メンテで増設予定", "date": "2026-10-20"}]
+        with mock.patch.object(agent, "_llm", llm):
+            turn = agent.run_turn(history, "その後どうなった？", [SINCE], self.events.append, since="2026-10-20")
+
+        # 聞き返さずに調べ、最初の調査も再調査も前回の日付より後だけを探す
+        self.assertNotIn("kind", turn)
+        self.assertFalse(any(c["who"].endswith("（受付）") for c in turn["trace"]))
+        self.assertEqual([r["steps"][0]["result"] for r in turn["reports"]], ["以降: 2026-10-20"] * 2)
+        member = next(c for c in turn["trace"] if c["who"].endswith("（日付つき）"))["messages"][1]["content"]
+        self.assertIn("- ディスク増設どうなった？", member)
+        self.assertIn("2026-10-20 以降の新しい動きだけ", member)
+        director = next(c for c in turn["trace"] if c["who"] == "シロ所長")["messages"][0]["content"]
+        self.assertIn("前回 2026-10-20 の回答から何が変わったか", director)
+        self.assertRegex(turn["date"], r"^\d{4}-\d{2}-\d{2}$")
 
     def test_clarify_then_answer(self):
         llm = FakeLLM([], ask="どのサーバーの話ですか？（監視サーバー・ファイルサーバーなど）")
@@ -255,6 +283,27 @@ class AgentTest(unittest.TestCase):
                 turn = agent.run_turn([], "ディスク", [source], self.events.append, clarify=False)
             member = next(c for c in turn["trace"] if c["who"].endswith("（写真）"))
             self.assertEqual("view_image" in member["tools"], expected, model)
+
+    def test_llm_calls_are_limited(self):
+        class SlowLLM(FakeLLM):
+            running = 0
+            peak = 0
+            lock = threading.Lock()
+
+            def invoke(self, messages):
+                with SlowLLM.lock:
+                    SlowLLM.running += 1
+                    SlowLLM.peak = max(SlowLLM.peak, SlowLLM.running)
+                time.sleep(0.05)
+                with SlowLLM.lock:
+                    SlowLLM.running -= 1
+                return super().invoke(messages)
+
+        # 所員は並列に動くが、LLMを同時に呼ぶのは枠の数まで
+        with mock.patch.object(agent, "_llm_slots", threading.BoundedSemaphore(1)):
+            turn = self.run_turn(SlowLLM([]))
+        self.assertEqual(turn["content"], "回答")
+        self.assertEqual(SlowLLM.peak, 1)
 
     def test_cancel_stops_whole_turn(self):
         def emit(event):

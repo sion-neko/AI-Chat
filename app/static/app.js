@@ -73,7 +73,10 @@ document.getElementById("close-characters").addEventListener("click", () => char
 characterDialog.addEventListener("close", loadConfig);
 
 document.getElementById("open-status").addEventListener("click", async () => {
-  renderStatus(await api("GET", "/api/status"));
+  const [status, mcp] = await Promise.all([api("GET", "/api/status"), api("GET", "/api/mcp")]);
+  renderStatus(status);
+  renderMcp(mcp);
+  closeMcpForm();
   statusDialog.showModal();
 });
 document.getElementById("close-status").addEventListener("click", () => statusDialog.close());
@@ -120,7 +123,8 @@ form.addEventListener("submit", (e) => {
 // 質問して調査させる。fromTurn（質問のターンの位置）があれば、そこから後をやり直す
 // skipClarify なら所長は聞き返さずに調べる
 // images は新しく添える画像（data URL）。shownImages は質問に並べて見せる画像（やり直しでは元の質問の画像）
-async function ask(content, fromTurn, skipClarify = false, images = [], shownImages = images) {
+// followup なら続報の調査（直前の回答を調べた日より後の動きだけを調べる）
+async function ask(content, fromTurn, skipClarify = false, images = [], shownImages = images, followup = false) {
   if (document.getElementById("empty")) {
     log.replaceChildren();
     renderHead({ title: content });
@@ -130,7 +134,7 @@ async function ask(content, fromTurn, skipClarify = false, images = [], shownIma
     for (const node of [...log.querySelectorAll(".turn")].filter((n) => Number(n.dataset.index) >= fromTurn)) node.remove();
   }
   const index = fromTurn ?? turnCount;
-  const turn = append(turnView(content, index, { images: shownImages }));
+  const turn = append(turnView(content, index, { images: shownImages, followup }));
 
   const progress = progressView();
   turn.append(progress.node);
@@ -143,6 +147,7 @@ async function ask(content, fromTurn, skipClarify = false, images = [], shownIma
     if (fromTurn !== null) body.from_turn = fromTurn;
     if (skipClarify) body.skip_clarify = true;
     if (images.length) body.images = images;
+    if (followup) body.followup = true;
     let result = null;
     await streamTurn(path, body, (event) => {
       if (event.type === "error") throw new Error(event.message);
@@ -161,6 +166,8 @@ async function ask(content, fromTurn, skipClarify = false, images = [], shownIma
     }
     progress.node.replaceWith(answerView(result.turn, index));
     if (result.question.image_text) turn.querySelector(".question-block").append(imageTextView(result.question.image_text));
+    if (result.question.since) turn.querySelector(".followup-since").textContent = followupLabel(result.question.since);
+    showFollowupOnLast();
     turnCount = index + 2;
     setPlaceholder(result.turn);
     if (!currentId) {
@@ -437,6 +444,129 @@ function selectedSources() {
 // ---- 接続確認 ----
 
 // results（確認の結果）がなければ、設定の有無だけ出す
+// ---- MCPサーバー ----
+
+const mcpForm = document.getElementById("mcp-form");
+// 編集しているサーバーのキー（null なら足す）
+let mcpEditing = null;
+
+function renderMcp({ path, servers }) {
+  document.getElementById("mcp-path").textContent = path;
+  const list = document.getElementById("mcp-list");
+  if (!servers.length) {
+    list.replaceChildren(el("div", "conv-empty", "まだありません。「＋ 足す」から足せます。"));
+    return;
+  }
+  list.replaceChildren(
+    ...servers.map((s) => {
+      const item = el("div", "mcp-item");
+      const head = el("div", "mcp-head");
+      head.append(
+        el("b", "", s.label),
+        el("span", s.connected ? "pill done" : "pill failed", s.connected ? "つながっています" : "つながりません"),
+        el("span", "mcp-where", s.url ?? [s.command, ...(s.args ?? [])].join(" ")),
+      );
+      const edit = el("button", "quiet", "編集");
+      edit.type = "button";
+      edit.addEventListener("click", () => openMcpForm(s));
+      const remove = el("button", "quiet danger", "外す");
+      remove.type = "button";
+      remove.addEventListener("click", async () => {
+        if (!confirm(`MCPサーバー「${s.label}」を外しますか？`)) return;
+        renderMcp(await api("DELETE", `/api/mcp/${s.key}`));
+        await refreshSources();
+      });
+      head.append(edit, remove);
+      const detail = s.connected
+        ? el("div", "mcp-detail", `使えるツール: ${s.tools.join(", ") || "なし"}`)
+        : el("div", "mcp-detail error-text", s.error);
+      item.append(head, detail);
+      return item;
+    }),
+  );
+}
+
+// 「名前: 値」「名前=値」の行を読み書きする
+function parseLines(text, separator) {
+  const result = {};
+  for (const line of text.split("\n")) {
+    const at = line.indexOf(separator);
+    if (at > 0) result[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+  }
+  return result;
+}
+
+function formatLines(dict = {}, separator) {
+  return Object.entries(dict)
+    .map(([k, v]) => `${k}${separator}${v}`)
+    .join("\n");
+}
+
+function setMcpKind(kind) {
+  for (const radio of mcpForm.querySelectorAll('[name="mcp-kind"]')) radio.checked = radio.value === kind;
+  document.getElementById("mcp-url-fields").hidden = kind !== "url";
+  document.getElementById("mcp-command-fields").hidden = kind !== "command";
+}
+
+function openMcpForm(server = null) {
+  mcpEditing = server?.key ?? null;
+  document.getElementById("mcp-form-title").textContent = server ? `「${server.label}」を編集` : "MCPサーバーを足す";
+  document.getElementById("mcp-label").value = server?.label ?? "";
+  document.getElementById("mcp-url").value = server?.url ?? "";
+  document.getElementById("mcp-type").value = server?.type ?? "";
+  document.getElementById("mcp-headers").value = formatLines(server?.headers, ": ");
+  document.getElementById("mcp-command").value = server?.command ?? "";
+  document.getElementById("mcp-args").value = (server?.args ?? []).join("\n");
+  document.getElementById("mcp-env").value = formatLines(server?.env, "=");
+  document.getElementById("mcp-status").textContent = "";
+  setMcpKind(server?.command ? "command" : "url");
+  mcpForm.hidden = false;
+  document.getElementById("mcp-label").focus();
+}
+
+function closeMcpForm() {
+  mcpForm.hidden = true;
+}
+
+// ソースが増減したので、入力欄のチップと接続確認の表を描き直す
+async function refreshSources() {
+  await loadConfig();
+  renderStatus(await api("GET", "/api/status"));
+}
+
+document.getElementById("add-mcp").addEventListener("click", () => openMcpForm());
+document.getElementById("mcp-cancel").addEventListener("click", closeMcpForm);
+for (const radio of mcpForm.querySelectorAll('[name="mcp-kind"]')) radio.addEventListener("change", () => setMcpKind(radio.value));
+mcpForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const kind = mcpForm.querySelector('[name="mcp-kind"]:checked').value;
+  const conf = { label: document.getElementById("mcp-label").value };
+  if (kind === "url") {
+    conf.url = document.getElementById("mcp-url").value;
+    conf.type = document.getElementById("mcp-type").value || undefined;
+    conf.headers = parseLines(document.getElementById("mcp-headers").value, ":");
+  } else {
+    conf.command = document.getElementById("mcp-command").value;
+    conf.args = document.getElementById("mcp-args").value.split("\n").map((a) => a.trim()).filter(Boolean);
+    conf.env = parseLines(document.getElementById("mcp-env").value, "=");
+  }
+  const save = document.getElementById("mcp-save");
+  const status = document.getElementById("mcp-status");
+  save.disabled = true;
+  status.textContent = "つないでいます…";
+  try {
+    const result = mcpEditing ? await api("PUT", `/api/mcp/${mcpEditing}`, conf) : await api("POST", "/api/mcp", conf);
+    renderMcp(result);
+    closeMcpForm();
+    await refreshSources();
+  } catch (err) {
+    status.textContent = err.message;
+  } finally {
+    save.disabled = false;
+    if (status.textContent === "つないでいます…") status.textContent = "";
+  }
+});
+
 function renderStatus(status, results) {
   const STATES = { ok: ["done", "OK"], error: ["failed", "エラー"], unset: ["unset", "未設定"] };
   const row = (name, result) => {
@@ -448,7 +578,8 @@ function renderStatus(status, results) {
   };
   const rows = [row("LLM", results?.llm ?? { message: `${status.llm.model}（${status.llm.base_url}）` })];
   for (const s of status.sources) {
-    const unset = { state: "unset", message: `${s.requires} を .env に書くと使えます` };
+    // MCPサーバーがつながらないのは「未設定」ではなくエラー（下の一覧から直す）
+    const unset = s.mcp ? { state: "error", message: s.requires } : { state: "unset", message: `${s.requires} を .env に書くと使えます` };
     rows.push(row(s.label, results?.sources[s.id] ?? (s.configured ? { message: "設定済み（まだ確認していません）" } : unset)));
   }
   document.getElementById("status-table").replaceChildren(...rows);
@@ -531,12 +662,13 @@ async function openConversation(id) {
   data.turns.forEach((t, i) => {
     if (t.role === "user") {
       const images = (t.images ?? []).map((id) => `/api/images/${id}`);
-      nodes.push(turnView(t.content, i, { images, imageText: t.image_text }));
+      nodes.push(turnView(t.content, i, { images, imageText: t.image_text, since: t.since }));
     }
     else nodes.at(-1).append(answerView(t, i - 1));
   });
   turnCount = data.turns.length;
   log.replaceChildren(...nodes);
+  showFollowupOnLast();
   log.scrollTop = log.scrollHeight;
   setPlaceholder(data.turns.at(-1));
   highlightCurrent();
@@ -821,10 +953,11 @@ function highlightCurrent() {
 // 1往復分の入れ物。質問を出し、回答はあとから足す
 // index は質問のターンの位置。やり直すときにサーバーへ渡す
 // images は質問に添えた画像のURL、imageText はそれを所長が文字に起こしたもの
-function turnView(question, index, { images = [], imageText = "" } = {}) {
+function turnView(question, index, { images = [], imageText = "", followup = false, since = "" } = {}) {
   const node = el("section", "turn");
   node.dataset.index = index;
   node.images = images;
+  node.followup = followup || Boolean(since);
   const block = el("div", "question-block");
   const bubble = el("div", "question", question);
   const edit = el("button", "question-edit", "編集");
@@ -834,6 +967,7 @@ function turnView(question, index, { images = [], imageText = "" } = {}) {
   const row = el("div", "question-row");
   row.append(edit, bubble);
   block.append(row);
+  if (node.followup) block.append(el("span", "pill followup followup-since", since ? followupLabel(since) : "続報"));
   if (images.length) {
     const gallery = el("div", "question-images");
     for (const src of images) {
@@ -846,6 +980,22 @@ function turnView(question, index, { images = [], imageText = "" } = {}) {
   if (imageText) block.append(imageTextView(imageText));
   node.append(block);
   return node;
+}
+
+function followupLabel(since) {
+  return `続報（${since} 以降）`;
+}
+
+// 「その後どうなった？」は最後の回答にだけ出す（途中の回答の続報は、会話の流れと合わなくなる）
+function showFollowupOnLast() {
+  // 最後が所長の聞き返しなら、どれも出さない（先に答えてもらう）
+  const last = [...log.querySelectorAll(".turn")].at(-1);
+  for (const b of log.querySelectorAll(".followup-ask")) b.hidden = b.closest(".turn") !== last;
+}
+
+function askFollowup() {
+  if (running) return;
+  ask("その後どうなった？", null, false, [], [], true);
 }
 
 // 添えた画像から所長が読み取った内容。読み違いに気づけるよう、たたんで出しておく
@@ -864,7 +1014,8 @@ function confirmRedo(index) {
 // 画像はサーバーが元の質問のものを使い直すので、送らずに見せるだけ
 function redo(content, index, skipClarify = false) {
   if (running || !confirmRedo(index)) return;
-  ask(content, index, skipClarify, [], turnImages(index));
+  const node = log.querySelector(`.turn[data-index="${index}"]`);
+  ask(content, index, skipClarify, [], turnImages(index), Boolean(node?.followup));
 }
 
 function turnImages(index) {
@@ -898,7 +1049,7 @@ function editQuestion(node, question, index) {
     const content = field.value.trim();
     if (!content) return;
     if (running || !confirmRedo(index)) return;
-    ask(content, index, false, [], node.images);
+    ask(content, index, false, [], node.images, node.followup);
   });
   field.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -964,6 +1115,11 @@ function answerView(turn, index) {
   regenerate.title = "同じ質問でもう一度調べる";
   regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").querySelector(".question").textContent, index));
   actions.append(regenerate);
+  const followup = el("button", "followup-ask", "その後どうなった？");
+  followup.type = "button";
+  followup.title = turn.date ? `${turn.date} 以降の動きだけを調べる` : "この回答の日以降の動きだけを調べる";
+  followup.addEventListener("click", askFollowup);
+  actions.append(followup);
   if (trace_id) {
     const button = el("button", "", `LLMとのやりとり（${llm_calls}回）`);
     button.type = "button";

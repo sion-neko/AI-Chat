@@ -3,9 +3,15 @@
 from app.sources import dummy, github, gitlab, mcp_servers, zulip
 from app.sources.base import Source
 
-__all__ = ["ALL_SOURCES", "Source", "SourceError", "check", "describe", "resolve", "resolve_scopes", "scope_choices", "status"]
+__all__ = ["Source", "SourceError", "all_sources", "check", "describe", "resolve", "resolve_scopes", "scope_choices", "status"]
 
-ALL_SOURCES: list[Source] = [dummy.CHAT, dummy.WIKI, github.GITHUB, gitlab.GITLAB, zulip.ZULIP, *mcp_servers.load()]
+BUILTIN: list[Source] = [dummy.CHAT, dummy.WIKI, github.GITHUB, gitlab.GITLAB, zulip.ZULIP]
+mcp_servers.load()
+
+
+def all_sources() -> list[Source]:
+    """組み込みのソースと、MCPサーバーのソース。MCPサーバーは画面から足し引きできるので、毎回組み立てる。"""
+    return [*BUILTIN, *mcp_servers.sources()]
 
 
 class SourceError(Exception):
@@ -14,16 +20,21 @@ class SourceError(Exception):
 
 def describe() -> list[dict]:
     """画面に出すソースの一覧。設定がそろっていないソースは出さない。scope_label は範囲を選べるソースだけ。"""
-    return [{"id": s.id, "label": s.label, "scope_label": s.scope_label if s.scopes else ""} for s in ALL_SOURCES if s.configured]
+    return [{"id": s.id, "label": s.label, "scope_label": s.scope_label if s.scopes else ""} for s in all_sources() if s.configured]
 
 
 def status() -> list[dict]:
     """接続確認の画面に出す一覧。設定されていないソースも、必要な設定と一緒に出す。"""
-    return [{"id": s.id, "label": s.label, "configured": s.configured, "requires": s.requires} for s in ALL_SOURCES]
+    return [
+        {"id": s.id, "label": s.label, "configured": s.configured, "requires": s.requires, "mcp": s.id.startswith("mcp_")}
+        for s in all_sources()
+    ]
 
 
 def check(source: Source) -> dict:
     """ソースに実際につないでみる。結果は {"state": "ok" / "error" / "unset", "message"}。"""
+    if not source.configured and source.id.startswith("mcp_"):
+        return {"state": "error", "message": source.requires}
     if not source.configured:
         return {"state": "unset", "message": f"{source.requires} を .env に書くと使えます"}
     if not source.check:
@@ -56,7 +67,7 @@ def resolve(source_ids: list[str]) -> list[Source]:
     """指定されたソースを返す。使えないソースが含まれていたら SourceError。"""
     if not source_ids:
         raise SourceError("ソースを1つ以上選んでください")
-    by_id = {s.id: s for s in ALL_SOURCES}
+    by_id = {s.id: s for s in all_sources()}
     selected = []
     for source_id in dict.fromkeys(source_ids):  # 重複を除く
         source = by_id.get(source_id)

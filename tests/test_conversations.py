@@ -108,6 +108,16 @@ class ConversationsTest(unittest.TestCase):
         with self.assertRaises(web.InputError):
             web.conversation_changes({"folder_id": "nope"})
 
+    def test_followup_since(self):
+        conv = {"updated_at": "2026-10-20T03:00:00+00:00"}
+        asked = {"role": "user", "content": "ディスク増設どうなった？"}
+        self.assertEqual(web.followup_since([asked, {"role": "assistant", "content": "a", "date": "2026-10-22"}], conv), "2026-10-22")
+        # 日付を持つ前の回答は、会話の更新日から
+        self.assertEqual(web.followup_since([asked, {"role": "assistant", "content": "a"}], conv), "2026-10-20")
+        for history in ([], [asked, {"role": "assistant", "kind": "clarify", "content": "どの件？"}]):
+            with self.assertRaises(web.InputError):
+                web.followup_since(history, conv)
+
     def test_validation(self):
         self.assertEqual(web.conversation_changes({"title": " VPN証明書 ", "archived": 1}), {"title": "VPN証明書", "archived": True})
         with self.assertRaises(web.InputError):

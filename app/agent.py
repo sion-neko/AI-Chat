@@ -20,8 +20,10 @@ LLMとのやりとりは Trace に記録し、返り値の trace に入れる（
 """
 
 import os
+import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 
@@ -118,6 +120,19 @@ DIRECTOR_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name
 - 報告では答えきれないとき（結末が分からない、報告どうしが食い違う、検索語や期間の見落としがありそう等）は、
   request_reinvestigation で所員に再調査を頼める。頼むのは本当に必要なときだけにし、何をどう調べ直すかを具体的に書く"""
 
+# 続報を調べるとき（「その後どうなった？」）に足す
+MEMBER_SINCE_NOTE = """
+
+## 続報の調査
+この件は {since} に一度調べています。{since} 以降の新しい動きだけを探してください。
+- 検索ツールの since は {since} より前にできない（指定しても {since} からになる）
+- 報告するのは {since} 以降に起きたことだけ。それより前の経緯は書かない
+- 新しい動きがなければ「{since} 以降の動きは見つからなかった」と報告する"""
+
+DIRECTOR_SINCE_NOTE = """
+- 今回は続報の確認。前回 {since} の回答から何が変わったか（決まったこと・進んだこと・新しく出た問題）だけを答える。
+  前回の回答の繰り返しはしない。新しい動きがなければ、そう短く伝える"""
+
 INTAKE_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name}」です。{persona}
 依頼人の質問を受け付け、所員に調べさせる前に、聞き返す必要があるかを判断します。今日は {today} です。
 所員はチャットやIssueなどを検索して調べます。
@@ -147,11 +162,26 @@ REMEMBER_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name
 # 1回の調査でメモに書き足す件数の上限
 REMEMBER_LIMIT = 3
 
+# LLMを同時に呼ぶ数の上限。所員は並列に動くので、GPU1台のローカルLLMサーバーが詰まらないよう絞る
+LLM_CONCURRENCY = int(os.environ.get("LLM_CONCURRENCY") or 2)
+# 1回の呼び出しを待つ上限（秒）。サーバーが固まっても調査が終わらなくならないように
+LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT") or 300)
+
 _llm = ChatOpenAI(
     base_url=os.environ["LLM_BASE_URL"],
     api_key=os.environ["LLM_API_KEY"],
     model=os.environ["LLM_MODEL"],
+    timeout=LLM_TIMEOUT,
+    max_retries=1,
 )
+_llm_slots = threading.BoundedSemaphore(LLM_CONCURRENCY)
+
+
+@contextmanager
+def _llm_slot():
+    """LLMを呼ぶ間だけ枠を1つ使う。LLMの呼び出しはすべてこの中で行う。"""
+    with _llm_slots:
+        yield
 
 
 def describe_image(data_url: str, purpose: str, trace: Trace, who: str) -> str:
@@ -159,7 +189,8 @@ def describe_image(data_url: str, purpose: str, trace: Trace, who: str) -> str:
     content = [{"type": "text", "text": f"{IMAGE_PROMPT}\n\n{purpose}"}, {"type": "image_url", "image_url": {"url": data_url}}]
     messages = [HumanMessage(content=content)]
     started = time.monotonic()
-    answer = _llm.invoke(messages)
+    with _llm_slot():
+        answer = _llm.invoke(messages)
     trace.record(who, messages, [], answer, time.monotonic() - started)
     return answer.text.strip()
 
@@ -200,7 +231,8 @@ def _tool_loop(system_prompt: str, tools: list[BaseTool], trace: Trace, who: str
     def call_llm(state: MessagesState):
         messages = [SystemMessage(system_prompt), *state["messages"]]
         started = time.monotonic()
-        response = llm.invoke(messages)
+        with _llm_slot():
+            response = llm.invoke(messages)
         trace.record(who, messages, tools, response, time.monotonic() - started)
         return {"messages": [response]}
 
@@ -222,12 +254,14 @@ def run_member(
     scope: list[str] | None = None,
     followup: dict | None = None,
     memo: str = "",
+    since: str | None = None,
 ) -> dict:
     """所員1人に調査させ、報告を返す。失敗しても例外は投げず、error に入れて返す。
 
     scope は画面で選んだ検索範囲（リポジトリやチャンネル）。None なら絞らない。
     followup は所長からの再調査の依頼 {"instruction": 依頼, "previous": 前回の報告}。
     memo はプロンプトに足す事務所のメモ（memo_section で作る）。
+    since は続報を調べるときの前回の調査日（YYYY-MM-DD）。検索はその日より前を探さない。
     """
     character = characters.member(source.id, source.label)
     report = {"source": source.id, "label": source.label, "agent": character.name, "content": "", "steps": [], "error": None}
@@ -250,11 +284,14 @@ def run_member(
         request = "これまでの質問:\n" + "\n".join(f"- {q}" for q in earlier) + f"\n\n{request}"
     if scope:
         request += f"\n\n検索範囲（{source.scope_label}）は次に絞られています: {', '.join(scope)}"
+    if since:
+        request += MEMBER_SINCE_NOTE.format(since=since)
     if followup:
         request += f"\n\n## あなたの前回の報告\n{followup['previous']}\n\n## 所長からの再調査の依頼\n{followup['instruction']}"
 
     # このスレッドで動く検索ツールに、範囲を渡す
     search_scope.set(scope)
+    search_scope.set_since(since)
     started = time.monotonic()
     called_at = {}  # ツール呼び出しID → 呼んだ時刻（結果が返るまでの時間を測る）
     try:
@@ -312,10 +349,11 @@ def _stream(llm, messages: list, emit: Emit, trace: Trace, who: str, tools: list
     """回答を受け取りながら、届いた文字を delta イベントで流す。ツール呼び出しも含めて全体をまとめて返す。"""
     started = time.monotonic()
     answer = None
-    for chunk in llm.stream(messages):
-        answer = chunk if answer is None else answer + chunk
-        if chunk.text:
-            emit({"type": "delta", "text": chunk.text})
+    with _llm_slot():
+        for chunk in llm.stream(messages):
+            answer = chunk if answer is None else answer + chunk
+            if chunk.text:
+                emit({"type": "delta", "text": chunk.text})
     trace.record(who, messages, tools, answer, time.monotonic() - started)
     return answer
 
@@ -329,12 +367,17 @@ def run_director(
     emit: Emit,
     trace: Trace,
     memo: str = "",
+    since: str | None = None,
 ) -> dict:
     """所長が報告を読み、必要なら再調査を頼んでから回答する。
 
     history は過去のターン（質問と所長の回答）。返り値の followups は再調査で増えた報告。
+    since は続報を調べるときの前回の調査日。
     """
-    prompt = DIRECTOR_PROMPT.format(name=director.name, persona=director.persona, today=date.today()) + memo
+    prompt = DIRECTOR_PROMPT.format(name=director.name, persona=director.persona, today=date.today())
+    if since:
+        prompt += DIRECTOR_SINCE_NOTE.format(since=since)
+    prompt += memo
     messages = [SystemMessage(prompt), *_history_messages(history)]
 
     sections = [f"### {r['agent']}（{r['label']}、ソースID: {r['source']}）\n{_report_text(r)}" for r in reports]
@@ -358,7 +401,7 @@ def run_director(
             emit({"type": "followup", "source": source.id, "agent": latest[source.id]["agent"], "instruction": call["args"]["instruction"]})
             previous = _report_text(latest[source.id])
             request = {"instruction": call["args"]["instruction"], "previous": previous}
-            return run_member(source, questions, emit, trace, latest[source.id].get("scope"), request, memo)
+            return run_member(source, questions, emit, trace, latest[source.id].get("scope"), request, memo, since)
 
         with ThreadPoolExecutor(max_workers=len(calls) or 1) as pool:
             results = dict(zip((c["id"] for c in calls), pool.map(follow, calls)))
@@ -379,7 +422,8 @@ def run_director(
 def check_llm() -> dict:
     """LLMに短い質問を1回送って、つながるか確かめる。結果は sources.check と同じ形。"""
     try:
-        answer = _llm.invoke([HumanMessage("接続の確認です。「OK」とだけ返してください。")])
+        with _llm_slot():
+            answer = _llm.invoke([HumanMessage("接続の確認です。「OK」とだけ返してください。")])
     except Exception as e:
         return {"state": "error", "message": f"{type(e).__name__}: {e}"}
     model = answer.response_metadata.get("model_name") or os.environ["LLM_MODEL"]
@@ -421,7 +465,8 @@ def intake(director: characters.Character, history: list[dict], question: str, t
     messages = [SystemMessage(prompt), *_history_messages(history), HumanMessage(question)]
     started = time.monotonic()
     try:
-        answer = _llm.bind_tools([ASK_USER_TOOL]).invoke(messages)
+        with _llm_slot():
+            answer = _llm.bind_tools([ASK_USER_TOOL]).invoke(messages)
     except Exception:
         return None
     trace.record(f"{director.name}所長（受付）", messages, [ASK_USER_TOOL], answer, time.monotonic() - started)
@@ -490,7 +535,8 @@ def remember(
     tool = _remember_tool(has_folder)
     started = time.monotonic()
     try:
-        response = _llm.bind_tools([tool]).invoke(messages)
+        with _llm_slot():
+            response = _llm.bind_tools([tool]).invoke(messages)
     except Exception:
         return []
     trace.record(f"{director.name}所長（メモ）", messages, [tool], response, time.monotonic() - started)
@@ -535,6 +581,7 @@ def run_turn(
     clarify: bool = True,
     memos: dict | None = None,
     images: list[str] | None = None,
+    since: str | None = None,
 ) -> dict:
     """1ターン分の調査と回答。返り値は保存・表示用の assistant ターン。
 
@@ -544,6 +591,7 @@ def run_turn(
     （保存する側が依頼人のターンに移す。次のターンからは文字のほうを使う）。
     clarify が False なら聞き返さない（依頼人が「聞き返さずに調べる」を選んだとき）。
     直前に聞き返したばかりのときも、続けては聞き返さない。
+    since（YYYY-MM-DD）があれば続報の調査（「その後どうなった？」）。その日より後の動きだけを調べ、聞き返さない。
     聞き返したときは kind: "clarify" のターンを返す（reports などは持たない）。
 
     trace（LLMとのやりとり）は大きいので、保存する側が会話とは分けて保存する。
@@ -556,13 +604,14 @@ def run_turn(
     asked = user_text({"content": question, "image_text": image_text})
     extra = {"image_text": image_text} if image_text else {}
 
-    if clarify and not (history and history[-1].get("kind") == "clarify"):
+    if clarify and not since and not (history and history[-1].get("kind") == "clarify"):
         emit({"type": "intake_start", "agent": director.name})
         if ask := intake(director, history, asked, trace, memo):
             return {
                 "role": "assistant",
                 "kind": "clarify",
                 "agent": director.name,
+                "date": date.today().isoformat(),
                 "content": ask["question"],
                 "model": ask["model"],
                 **extra,
@@ -573,10 +622,10 @@ def run_turn(
 
     questions = member_questions(history, asked)
     with ThreadPoolExecutor(max_workers=len(sources)) as pool:
-        reports = list(pool.map(lambda s: run_member(s, questions, emit, trace, (scopes or {}).get(s.id), memo=memo), sources))
+        reports = list(pool.map(lambda s: run_member(s, questions, emit, trace, (scopes or {}).get(s.id), memo=memo, since=since), sources))
 
     emit({"type": "director_start", "agent": director.name})
-    answer = run_director(director, history, questions, reports, sources, emit, trace, memo)
+    answer = run_director(director, history, questions, reports, sources, emit, trace, memo, since)
     reports += answer.pop("followups")
 
     emit({"type": "memo_start", "agent": director.name})
@@ -584,6 +633,8 @@ def run_turn(
     return {
         "role": "assistant",
         "agent": director.name,
+        # 調べた日。次に「その後どうなった？」と聞かれたら、この日より後を調べる
+        "date": date.today().isoformat(),
         **answer,
         "reports": reports,
         "links": links.verify(answer["content"], reports),

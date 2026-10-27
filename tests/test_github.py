@@ -53,6 +53,15 @@ class GitHubTest(unittest.TestCase):
         github.search_github.invoke({"query": "x", "since": "2026-09-01", "until": "2026-09-30"})
         self.assertIn("updated:2026-09-01..2026-09-30", api.requests[0]["params"]["q"])
 
+    def test_followup_since_is_floor(self):
+        api = self.serve({"/search/issues": {"items": []}})
+        scope.set_since("2026-10-20")
+        self.addCleanup(scope.set_since, None)
+        # 前回の調査より前は探さない。後ろの日付なら、LLMの指定どおり
+        for asked, expected in [(None, "updated:>=2026-10-20"), ("2026-09-01", "updated:>=2026-10-20"), ("2026-10-25", "updated:>=2026-10-25")]:
+            github.search_github.invoke({"query": "x", "since": asked})
+            self.assertIn(expected, api.requests[-1]["params"]["q"])
+
     def test_get_issue_with_comments(self):
         self.serve({"/repos/me/infra/issues/7": ISSUE, "/repos/me/infra/issues/7/comments": [COMMENT]})
         issue = github.get_github_issue.invoke({"repo": "me/infra", "number": 7})

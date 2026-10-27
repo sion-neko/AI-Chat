@@ -23,6 +23,10 @@ API:
   PUT    /api/characters/{key}            {name, persona} キャラクターを編集する。key は "director" かソースID
   DELETE /api/characters/{key}            キャラクターを既定に戻す
   GET    /api/sources/{id}/scopes         そのソースで選べる検索範囲（リポジトリやチャンネル）
+  GET    /api/mcp                         MCPサーバーの設定と、つないだ結果
+  POST   /api/mcp                         {label, url か command, ...} MCPサーバーを足して、つなぐ
+  PUT    /api/mcp/{key}                   MCPサーバーの設定を変えて、つなぎ直す
+  DELETE /api/mcp/{key}                   MCPサーバーを外す
   GET    /api/status                      LLMの設定と、すべてのソース（未設定のものも）
   POST   /api/check                       LLMと設定済みのソースに実際につないでみる
 
@@ -63,6 +67,7 @@ from pathlib import Path
 import base64
 
 from app import agent, characters, db, models, sources
+from app.sources import mcp_servers
 
 STATIC_DIR = Path(__file__).parent / "static"
 CONTENT_TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
@@ -189,6 +194,14 @@ def add_to_memo(conv_id: str, notes: list[dict]) -> list[dict]:
     return result
 
 
+def followup_since(history: list[dict], conversation: dict) -> str:
+    """「その後どうなった？」で調べ始める日。直前の回答を調べた日（日付を持つ前の回答は、会話の更新日）。"""
+    last = history[-1] if history else None
+    if not last or last["role"] != "assistant" or last.get("kind") == "clarify":
+        raise InputError("続報を調べられるのは、所長が回答した後だけです")
+    return last.get("date") or conversation["updated_at"][:10]
+
+
 def memos_for(conv_id: str | None, folder_id: str | None) -> dict:
     """調査のプロンプトに入れるメモ。会話がフォルダに入っていれば、そのフォルダのメモも。"""
     if conv_id:
@@ -230,9 +243,10 @@ def status() -> dict:
 
 def check() -> dict:
     """LLMとソースの接続確認を並列に行う。"""
+    all_sources = sources.all_sources()
     with ThreadPoolExecutor() as pool:
         llm = pool.submit(agent.check_llm)
-        results = dict(zip((s.id for s in sources.ALL_SOURCES), pool.map(sources.check, sources.ALL_SOURCES)))
+        results = dict(zip((s.id for s in all_sources), pool.map(sources.check, all_sources)))
         return {"llm": llm.result(), "sources": results}
 
 
@@ -257,7 +271,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self, fn):
         try:
             fn()
-        except (sources.SourceError, characters.CharacterError, InputError) as e:
+        except (sources.SourceError, characters.CharacterError, InputError, mcp_servers.McpConfigError) as e:
             self._send_json(400, {"error": str(e)})
         except Exception as e:
             traceback.print_exc()
@@ -294,6 +308,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, character_list())
         if m := re.fullmatch(r"/api/sources/(\w+)/scopes", self.path):
             return self._send_json(200, sources.scope_choices(m[1]))
+        if self.path == "/api/mcp":
+            return self._send_json(200, {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()})
         if self.path == "/api/status":
             return self._send_json(200, status())
         if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
@@ -354,6 +370,9 @@ class Handler(BaseHTTPRequestHandler):
                     image_ids = history[start]["images"]
                     images = [db.load_image(i) for i in image_ids]
                 history = history[:start]
+            since = None
+            if req.get("followup"):
+                since = followup_since(history, db.get_conversation(m[1]))
             return self._stream_turn(
                 m[1],
                 history,
@@ -365,7 +384,12 @@ class Handler(BaseHTTPRequestHandler):
                 clarify=not req.get("skip_clarify"),
                 images=images,
                 image_ids=image_ids,
+                since=since,
             )
+        if self.path == "/api/mcp":
+            conf = self._read_json()
+            mcp_servers.save(mcp_servers.new_key(str(conf.get("label", ""))), conf)
+            return self._send_json(200, {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()})
         if self.path == "/api/folders":
             folder_id = db.create_folder(_name(self._read_json().get("name", ""), FOLDER_NAME_LENGTH))
             return self._send_json(200, db.get_folder(folder_id))
@@ -396,6 +420,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def _put(self):
+        if m := re.fullmatch(r"/api/mcp/(\w+)", self.path):
+            if m[1] not in mcp_servers.read_config():
+                return self._send_json(404, {"error": "not found"})
+            mcp_servers.save(m[1], self._read_json())
+            return self._send_json(200, {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()})
         if m := re.fullmatch(r"/api/characters/(\w+)", self.path):
             if not _character_key(m[1]):
                 return self._send_json(404, {"error": "not found"})
@@ -408,6 +437,9 @@ class Handler(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
             db.delete_conversation(m[1])
             return self._send_json(200, {})
+        if m := re.fullmatch(r"/api/mcp/(\w+)", self.path):
+            mcp_servers.delete(m[1])
+            return self._send_json(200, {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()})
         if m := re.fullmatch(r"/api/folders/(\w+)", self.path):
             db.delete_folder(m[1])
             return self._send_json(200, {})
@@ -430,11 +462,13 @@ class Handler(BaseHTTPRequestHandler):
         clarify: bool = True,
         images: list[tuple[str, bytes]] | None = None,
         image_ids: list[str] | None = None,
+        since: str | None = None,
     ):
         """調査を別スレッドで走らせ、キューに溜まったイベントを1行ずつ書き出す。
 
         所員は並列で動くので、レスポンスへの書き込みはこのスレッドだけで行う。
         images は質問に添えられた画像。調査が成功したときだけ保存する（image_ids があれば、保存済みの同じ画像）。
+        since は続報を調べるときの前回の調査日（followup_since）。
         """
         events: queue.Queue[dict | None] = queue.Queue()
         turn_id = uuid.uuid4().hex
@@ -449,11 +483,13 @@ class Handler(BaseHTTPRequestHandler):
         def work():
             try:
                 urls = [_data_url(mime, data) for mime, data in images or []]
-                turn = agent.run_turn(history, question, selected, emit, scopes, clarify, memos_for(conv_id, None), urls)
+                turn = agent.run_turn(history, question, selected, emit, scopes, clarify, memos_for(conv_id, None), urls, since)
                 turn["trace_id"] = db.save_trace(conv_id, turn.pop("trace"))
                 if "memo_notes" in turn:
                     turn["memo_added"] = add_to_memo(conv_id, turn.pop("memo_notes"))
                 asked = {"role": "user", "content": question}
+                if since:
+                    asked["since"] = since
                 if images:
                     asked["images"] = image_ids or [db.save_image(conv_id, mime, data) for mime, data in images]
                     asked["image_text"] = turn.pop("image_text", "")

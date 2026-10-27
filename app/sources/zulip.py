@@ -83,6 +83,7 @@ def search_zulip(query: str, since: str | None = None, until: str | None = None,
     channel: チャンネル名で絞る。省略可（検索範囲が決められているときは、その中のチャンネルだけ）
     新しい順に最大20件。話の続きは get_zulip_topic でトピックごと読む。
     """
+    since = scope.since(since)  # 続報を調べるときは、前回の調査より前を探さない
     # 画面でチャンネルを選んでいれば、その中だけを探す（Zulipの narrow はチャンネルを1つしか指定できないので、1つずつ）
     allowed = scope.get()
     if channel and allowed and channel not in allowed:
