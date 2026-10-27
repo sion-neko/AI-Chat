@@ -73,7 +73,10 @@ document.getElementById("close-characters").addEventListener("click", () => char
 characterDialog.addEventListener("close", loadConfig);
 
 document.getElementById("open-status").addEventListener("click", async () => {
-  renderStatus(await api("GET", "/api/status"));
+  const [status, mcp] = await Promise.all([api("GET", "/api/status"), api("GET", "/api/mcp")]);
+  renderStatus(status);
+  renderMcp(mcp);
+  closeMcpForm();
   statusDialog.showModal();
 });
 document.getElementById("close-status").addEventListener("click", () => statusDialog.close());
@@ -437,6 +440,129 @@ function selectedSources() {
 // ---- 接続確認 ----
 
 // results（確認の結果）がなければ、設定の有無だけ出す
+// ---- MCPサーバー ----
+
+const mcpForm = document.getElementById("mcp-form");
+// 編集しているサーバーのキー（null なら足す）
+let mcpEditing = null;
+
+function renderMcp({ path, servers }) {
+  document.getElementById("mcp-path").textContent = path;
+  const list = document.getElementById("mcp-list");
+  if (!servers.length) {
+    list.replaceChildren(el("div", "conv-empty", "まだありません。「＋ 足す」から足せます。"));
+    return;
+  }
+  list.replaceChildren(
+    ...servers.map((s) => {
+      const item = el("div", "mcp-item");
+      const head = el("div", "mcp-head");
+      head.append(
+        el("b", "", s.label),
+        el("span", s.connected ? "pill done" : "pill failed", s.connected ? "つながっています" : "つながりません"),
+        el("span", "mcp-where", s.url ?? [s.command, ...(s.args ?? [])].join(" ")),
+      );
+      const edit = el("button", "quiet", "編集");
+      edit.type = "button";
+      edit.addEventListener("click", () => openMcpForm(s));
+      const remove = el("button", "quiet danger", "外す");
+      remove.type = "button";
+      remove.addEventListener("click", async () => {
+        if (!confirm(`MCPサーバー「${s.label}」を外しますか？`)) return;
+        renderMcp(await api("DELETE", `/api/mcp/${s.key}`));
+        await refreshSources();
+      });
+      head.append(edit, remove);
+      const detail = s.connected
+        ? el("div", "mcp-detail", `使えるツール: ${s.tools.join(", ") || "なし"}`)
+        : el("div", "mcp-detail error-text", s.error);
+      item.append(head, detail);
+      return item;
+    }),
+  );
+}
+
+// 「名前: 値」「名前=値」の行を読み書きする
+function parseLines(text, separator) {
+  const result = {};
+  for (const line of text.split("\n")) {
+    const at = line.indexOf(separator);
+    if (at > 0) result[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+  }
+  return result;
+}
+
+function formatLines(dict = {}, separator) {
+  return Object.entries(dict)
+    .map(([k, v]) => `${k}${separator}${v}`)
+    .join("\n");
+}
+
+function setMcpKind(kind) {
+  for (const radio of mcpForm.querySelectorAll('[name="mcp-kind"]')) radio.checked = radio.value === kind;
+  document.getElementById("mcp-url-fields").hidden = kind !== "url";
+  document.getElementById("mcp-command-fields").hidden = kind !== "command";
+}
+
+function openMcpForm(server = null) {
+  mcpEditing = server?.key ?? null;
+  document.getElementById("mcp-form-title").textContent = server ? `「${server.label}」を編集` : "MCPサーバーを足す";
+  document.getElementById("mcp-label").value = server?.label ?? "";
+  document.getElementById("mcp-url").value = server?.url ?? "";
+  document.getElementById("mcp-type").value = server?.type ?? "";
+  document.getElementById("mcp-headers").value = formatLines(server?.headers, ": ");
+  document.getElementById("mcp-command").value = server?.command ?? "";
+  document.getElementById("mcp-args").value = (server?.args ?? []).join("\n");
+  document.getElementById("mcp-env").value = formatLines(server?.env, "=");
+  document.getElementById("mcp-status").textContent = "";
+  setMcpKind(server?.command ? "command" : "url");
+  mcpForm.hidden = false;
+  document.getElementById("mcp-label").focus();
+}
+
+function closeMcpForm() {
+  mcpForm.hidden = true;
+}
+
+// ソースが増減したので、入力欄のチップと接続確認の表を描き直す
+async function refreshSources() {
+  await loadConfig();
+  renderStatus(await api("GET", "/api/status"));
+}
+
+document.getElementById("add-mcp").addEventListener("click", () => openMcpForm());
+document.getElementById("mcp-cancel").addEventListener("click", closeMcpForm);
+for (const radio of mcpForm.querySelectorAll('[name="mcp-kind"]')) radio.addEventListener("change", () => setMcpKind(radio.value));
+mcpForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const kind = mcpForm.querySelector('[name="mcp-kind"]:checked').value;
+  const conf = { label: document.getElementById("mcp-label").value };
+  if (kind === "url") {
+    conf.url = document.getElementById("mcp-url").value;
+    conf.type = document.getElementById("mcp-type").value || undefined;
+    conf.headers = parseLines(document.getElementById("mcp-headers").value, ":");
+  } else {
+    conf.command = document.getElementById("mcp-command").value;
+    conf.args = document.getElementById("mcp-args").value.split("\n").map((a) => a.trim()).filter(Boolean);
+    conf.env = parseLines(document.getElementById("mcp-env").value, "=");
+  }
+  const save = document.getElementById("mcp-save");
+  const status = document.getElementById("mcp-status");
+  save.disabled = true;
+  status.textContent = "つないでいます…";
+  try {
+    const result = mcpEditing ? await api("PUT", `/api/mcp/${mcpEditing}`, conf) : await api("POST", "/api/mcp", conf);
+    renderMcp(result);
+    closeMcpForm();
+    await refreshSources();
+  } catch (err) {
+    status.textContent = err.message;
+  } finally {
+    save.disabled = false;
+    if (status.textContent === "つないでいます…") status.textContent = "";
+  }
+});
+
 function renderStatus(status, results) {
   const STATES = { ok: ["done", "OK"], error: ["failed", "エラー"], unset: ["unset", "未設定"] };
   const row = (name, result) => {
@@ -448,7 +574,8 @@ function renderStatus(status, results) {
   };
   const rows = [row("LLM", results?.llm ?? { message: `${status.llm.model}（${status.llm.base_url}）` })];
   for (const s of status.sources) {
-    const unset = { state: "unset", message: `${s.requires} を .env に書くと使えます` };
+    // MCPサーバーがつながらないのは「未設定」ではなくエラー（下の一覧から直す）
+    const unset = s.mcp ? { state: "error", message: s.requires } : { state: "unset", message: `${s.requires} を .env に書くと使えます` };
     rows.push(row(s.label, results?.sources[s.id] ?? (s.configured ? { message: "設定済み（まだ確認していません）" } : unset)));
   }
   document.getElementById("status-table").replaceChildren(...rows);

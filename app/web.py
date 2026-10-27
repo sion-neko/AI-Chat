@@ -23,6 +23,10 @@ API:
   PUT    /api/characters/{key}            {name, persona} キャラクターを編集する。key は "director" かソースID
   DELETE /api/characters/{key}            キャラクターを既定に戻す
   GET    /api/sources/{id}/scopes         そのソースで選べる検索範囲（リポジトリやチャンネル）
+  GET    /api/mcp                         MCPサーバーの設定と、つないだ結果
+  POST   /api/mcp                         {label, url か command, ...} MCPサーバーを足して、つなぐ
+  PUT    /api/mcp/{key}                   MCPサーバーの設定を変えて、つなぎ直す
+  DELETE /api/mcp/{key}                   MCPサーバーを外す
   GET    /api/status                      LLMの設定と、すべてのソース（未設定のものも）
   POST   /api/check                       LLMと設定済みのソースに実際につないでみる
 
@@ -63,6 +67,7 @@ from pathlib import Path
 import base64
 
 from app import agent, characters, db, models, sources
+from app.sources import mcp_servers
 
 STATIC_DIR = Path(__file__).parent / "static"
 CONTENT_TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
@@ -230,9 +235,10 @@ def status() -> dict:
 
 def check() -> dict:
     """LLMとソースの接続確認を並列に行う。"""
+    all_sources = sources.all_sources()
     with ThreadPoolExecutor() as pool:
         llm = pool.submit(agent.check_llm)
-        results = dict(zip((s.id for s in sources.ALL_SOURCES), pool.map(sources.check, sources.ALL_SOURCES)))
+        results = dict(zip((s.id for s in all_sources), pool.map(sources.check, all_sources)))
         return {"llm": llm.result(), "sources": results}
 
 
@@ -257,7 +263,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self, fn):
         try:
             fn()
-        except (sources.SourceError, characters.CharacterError, InputError) as e:
+        except (sources.SourceError, characters.CharacterError, InputError, mcp_servers.McpConfigError) as e:
             self._send_json(400, {"error": str(e)})
         except Exception as e:
             traceback.print_exc()
@@ -294,6 +300,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, character_list())
         if m := re.fullmatch(r"/api/sources/(\w+)/scopes", self.path):
             return self._send_json(200, sources.scope_choices(m[1]))
+        if self.path == "/api/mcp":
+            return self._send_json(200, {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()})
         if self.path == "/api/status":
             return self._send_json(200, status())
         if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
@@ -366,6 +374,10 @@ class Handler(BaseHTTPRequestHandler):
                 images=images,
                 image_ids=image_ids,
             )
+        if self.path == "/api/mcp":
+            conf = self._read_json()
+            mcp_servers.save(mcp_servers.new_key(str(conf.get("label", ""))), conf)
+            return self._send_json(200, {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()})
         if self.path == "/api/folders":
             folder_id = db.create_folder(_name(self._read_json().get("name", ""), FOLDER_NAME_LENGTH))
             return self._send_json(200, db.get_folder(folder_id))
@@ -396,6 +408,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def _put(self):
+        if m := re.fullmatch(r"/api/mcp/(\w+)", self.path):
+            if m[1] not in mcp_servers.read_config():
+                return self._send_json(404, {"error": "not found"})
+            mcp_servers.save(m[1], self._read_json())
+            return self._send_json(200, {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()})
         if m := re.fullmatch(r"/api/characters/(\w+)", self.path):
             if not _character_key(m[1]):
                 return self._send_json(404, {"error": "not found"})
@@ -408,6 +425,9 @@ class Handler(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
             db.delete_conversation(m[1])
             return self._send_json(200, {})
+        if m := re.fullmatch(r"/api/mcp/(\w+)", self.path):
+            mcp_servers.delete(m[1])
+            return self._send_json(200, {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()})
         if m := re.fullmatch(r"/api/folders/(\w+)", self.path):
             db.delete_folder(m[1])
             return self._send_json(200, {})

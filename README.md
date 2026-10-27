@@ -37,7 +37,7 @@ Pythonを変更したら `docker compose restart agent`。
 | GitLab | `GITLAB_URL` `GITLAB_TOKEN`（`GITLAB_GROUP` で範囲を絞れる） | Issue・Merge Request とコメント（検索はタイトルと本文だけ） |
 | Zulip | `ZULIP_URL` `ZULIP_EMAIL` `ZULIP_API_KEY` | チャンネルのメッセージとDM、トピック単位の流れ |
 
-画面の「接続確認」で、LLMと各ソースに実際につながるかを確かめられる。
+ヘッダーの「ソース」の「接続確認」で、LLMと各ソースに実際につながるかを確かめられる。
 
 GitHub・GitLab・Zulip は、入力欄のソースの横の「▾」から、調べるリポジトリ・プロジェクト・チャンネルを選べる。選ぶと `.env` の `GITHUB_SCOPE` や `GITLAB_GROUP` より優先する。何も選ばなければ `.env` の設定どおりに調べる。
 
@@ -50,7 +50,10 @@ GitHub・GitLab・Zulip は、入力欄のソースの横の「▾」から、�
 
 ### MCPサーバーを足す
 
-`data/mcp.json` に書いたMCPサーバーが、1つずつ所員の担当ソースになる（書き方は Claude Desktop などと同じ `mcpServers` の形）。
+ヘッダーの「ソース」から、MCPサーバーを足したり直したり外したりできる。保存するとその場でつなぎ、再起動はいらない。
+足したMCPサーバーは、1つずつ所員の担当ソースになる。
+
+設定は `data/mcp.json` に書かれる（書き方は Claude Desktop などと同じ `mcpServers` の形）。手で書いてもよい（そのときはアプリを再起動する）。
 
 ```json
 {
@@ -63,7 +66,6 @@ GitHub・GitLab・Zulip は、入力欄のソースの横の「▾」から、�
 
 - `url` はHTTP（Streamable HTTP。`"type": "sse"` ならSSE）でつなぐ。自分のPCで動かしているサーバーには `host.docker.internal` でつながる
 - `command` はコンテナの中でサーバーを起動する。コンテナに入っていないコマンド（`npx` 等）は使えないので、HTTPでつなぐほうが手軽
-- 起動したときにつなぐので、書き換えたらアプリを再起動する
 
 Zulipの全文検索で日本語をうまく拾うには、Zulip側で PGroonga が有効になっている必要がある（Zulipの管理者の設定）。
 
