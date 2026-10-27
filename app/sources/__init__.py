@@ -1,11 +1,11 @@
 """検索ソースの一覧と、指定されたソースの検証。"""
 
-from app.sources import dummy, github, gitlab, zulip
+from app.sources import dummy, github, gitlab, mcp_servers, zulip
 from app.sources.base import Source
 
 __all__ = ["ALL_SOURCES", "Source", "SourceError", "check", "describe", "resolve", "status"]
 
-ALL_SOURCES: list[Source] = [dummy.CHAT, dummy.WIKI, github.GITHUB, gitlab.GITLAB, zulip.ZULIP]
+ALL_SOURCES: list[Source] = [dummy.CHAT, dummy.WIKI, github.GITHUB, gitlab.GITLAB, zulip.ZULIP, *mcp_servers.load()]
 
 
 class SourceError(Exception):
