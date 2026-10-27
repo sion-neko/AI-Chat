@@ -8,9 +8,11 @@
   3. 所長が報告をまとめて回答する
 
 進み具合は emit に渡したイベントで通知する。
+LLMとのやりとりは Trace に記録し、返り値の trace に入れる（あとから画面で確かめられるように）。
 """
 
 import os
+import time
 from collections.abc import Callable
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor
@@ -22,11 +24,40 @@ from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.prebuilt.tool_node import ToolInvocationError
 
-from app import characters
+from app import characters, links
 from app.sources import Source
+from app.sources import scope as search_scope
 from app.sources.http import ApiError
 
 Emit = Callable[[dict], None]
+
+
+class Trace:
+    """1ターン分のLLMとのやりとり。所員は並列に動くが、list.append はスレッドをまたいでも壊れない。"""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def record(self, who: str, messages: list, tools: list, response: AIMessage, seconds: float):
+        usage = response.usage_metadata or {}
+        self.calls.append(
+            {
+                "who": who,
+                "seconds": round(seconds, 2),
+                "input_tokens": usage.get("input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+                "tools": [t["function"]["name"] if isinstance(t, dict) else t.name for t in tools],
+                "messages": [_message_view(m) for m in messages],
+                "response": _message_view(response),
+            }
+        )
+
+
+def _message_view(msg) -> dict:
+    view = {"role": msg.type, "content": msg.text}
+    if getattr(msg, "tool_calls", None):
+        view["tool_calls"] = [{"name": c["name"], "args": c["args"]} for c in msg.tool_calls]
+    return view
 
 
 class Cancelled(BaseException):
@@ -56,7 +87,7 @@ DIRECTOR_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name
 
 - 報告に書かれた事実だけで答える。推測で補わない
 - 複数の報告を突き合わせ、経緯を時系列でまとめる
-- 回答には根拠のURLを必ず付ける
+- 回答には根拠のURLを必ず付ける。URLは所員の報告に書かれたものを一字一句そのまま使い、自分で作らない
 - どの所員も見つけられなかった場合は、そう伝える
 - 報告では答えきれないとき（結末が分からない、報告どうしが食い違う、検索語や期間の見落としがありそう等）は、
   request_reinvestigation で所員に再調査を頼める。頼むのは本当に必要なときだけにし、何をどう調べ直すかを具体的に書く"""
@@ -68,11 +99,15 @@ _llm = ChatOpenAI(
 )
 
 
-def _tool_loop(system_prompt: str, tools: list[BaseTool]):
+def _tool_loop(system_prompt: str, tools: list[BaseTool], trace: Trace, who: str):
     llm = _llm.bind_tools(tools)
 
     def call_llm(state: MessagesState):
-        return {"messages": [llm.invoke([SystemMessage(system_prompt), *state["messages"]])]}
+        messages = [SystemMessage(system_prompt), *state["messages"]]
+        started = time.monotonic()
+        response = llm.invoke(messages)
+        trace.record(who, messages, tools, response, time.monotonic() - started)
+        return {"messages": [response]}
 
     graph = StateGraph(MessagesState)
     graph.add_node("llm", call_llm)
@@ -84,13 +119,23 @@ def _tool_loop(system_prompt: str, tools: list[BaseTool]):
     return graph.compile()
 
 
-def run_member(source: Source, questions: list[str], emit: Emit, followup: dict | None = None) -> dict:
+def run_member(
+    source: Source,
+    questions: list[str],
+    emit: Emit,
+    trace: Trace,
+    scope: list[str] | None = None,
+    followup: dict | None = None,
+) -> dict:
     """所員1人に調査させ、報告を返す。失敗しても例外は投げず、error に入れて返す。
 
+    scope は画面で選んだ検索範囲（リポジトリやチャンネル）。None なら絞らない。
     followup は所長からの再調査の依頼 {"instruction": 依頼, "previous": 前回の報告}。
     """
     character = characters.member(source.id, source.label)
     report = {"source": source.id, "label": source.label, "agent": character.name, "content": "", "steps": [], "error": None}
+    if scope:
+        report["scope"] = scope
     if followup:
         report["request"] = followup["instruction"]
     emit({"type": "member_start", "source": source.id, "agent": character.name})
@@ -100,11 +145,17 @@ def run_member(source: Source, questions: list[str], emit: Emit, followup: dict 
     request = f"今回の質問: {current}"
     if earlier:
         request = "これまでの質問:\n" + "\n".join(f"- {q}" for q in earlier) + f"\n\n{request}"
+    if scope:
+        request += f"\n\n検索範囲（{source.scope_label}）は次に絞られています: {', '.join(scope)}"
     if followup:
         request += f"\n\n## あなたの前回の報告\n{followup['previous']}\n\n## 所長からの再調査の依頼\n{followup['instruction']}"
 
+    # このスレッドで動く検索ツールに、範囲を渡す
+    search_scope.set(scope)
+    started = time.monotonic()
+    called_at = {}  # ツール呼び出しID → 呼んだ時刻（結果が返るまでの時間を測る）
     try:
-        graph = _tool_loop(prompt, source.tools)
+        graph = _tool_loop(prompt, source.tools, trace, f"{character.name}（{source.label}）")
         stream = graph.stream(
             {"messages": [HumanMessage(request)]},
             {"recursion_limit": MEMBER_RECURSION_LIMIT},
@@ -115,16 +166,19 @@ def run_member(source: Source, questions: list[str], emit: Emit, followup: dict 
                 if isinstance(msg, AIMessage) and msg.tool_calls:
                     for call in msg.tool_calls:
                         report["steps"].append({"id": call["id"], "tool": call["name"], "args": call["args"], "result": None})
+                        called_at[call["id"]] = time.monotonic()
                         emit({"type": "tool", "source": source.id, "tool": call["name"], "args": call["args"]})
                 elif isinstance(msg, ToolMessage):
                     for step in report["steps"]:
                         if step["id"] == msg.tool_call_id:
                             step["result"] = msg.text
+                            step["seconds"] = round(time.monotonic() - called_at[step["id"]], 2)
                 elif isinstance(msg, AIMessage):
                     report["content"] = msg.text
     except Exception as e:
         report["error"] = f"{type(e).__name__}: {e}"
 
+    report["seconds"] = round(time.monotonic() - started, 2)
     emit({"type": "member_done", "report": report})
     return report
 
@@ -151,13 +205,15 @@ def _followup_tool(sources: list[Source]) -> dict:
     }
 
 
-def _stream(llm, messages: list, emit: Emit) -> AIMessage:
+def _stream(llm, messages: list, emit: Emit, trace: Trace, who: str, tools: list) -> AIMessage:
     """回答を受け取りながら、届いた文字を delta イベントで流す。ツール呼び出しも含めて全体をまとめて返す。"""
+    started = time.monotonic()
     answer = None
     for chunk in llm.stream(messages):
         answer = chunk if answer is None else answer + chunk
         if chunk.text:
             emit({"type": "delta", "text": chunk.text})
+    trace.record(who, messages, tools, answer, time.monotonic() - started)
     return answer
 
 
@@ -168,6 +224,7 @@ def run_director(
     reports: list[dict],
     sources: list[Source],
     emit: Emit,
+    trace: Trace,
 ) -> dict:
     """所長が報告を読み、必要なら再調査を頼んでから回答する。
 
@@ -186,8 +243,9 @@ def run_director(
     followups = []
     for round_ in range(FOLLOWUP_ROUNDS + 1):
         # 最後の回はツールを渡さず、回答させる
-        llm = _llm.bind_tools([_followup_tool(sources)]) if round_ < FOLLOWUP_ROUNDS else _llm
-        answer = _stream(llm, messages, emit)
+        tools = [_followup_tool(sources)] if round_ < FOLLOWUP_ROUNDS else []
+        llm = _llm.bind_tools(tools) if tools else _llm
+        answer = _stream(llm, messages, emit, trace, f"{director.name}所長", tools)
         if not answer.tool_calls:
             break
         messages.append(answer)
@@ -197,7 +255,7 @@ def run_director(
             source = by_id[call["args"]["source"]]
             emit({"type": "followup", "source": source.id, "agent": latest[source.id]["agent"], "instruction": call["args"]["instruction"]})
             previous = _report_text(latest[source.id])
-            return run_member(source, questions, emit, {"instruction": call["args"]["instruction"], "previous": previous})
+            return run_member(source, questions, emit, trace, latest[source.id].get("scope"), {"instruction": call["args"]["instruction"], "previous": previous})
 
         with ThreadPoolExecutor(max_workers=len(calls) or 1) as pool:
             results = dict(zip((c["id"] for c in calls), pool.map(follow, calls)))
@@ -225,14 +283,36 @@ def check_llm() -> dict:
     return {"state": "ok", "message": f"{model} が応答しました"}
 
 
-def run_turn(history: list[dict], question: str, sources: list[Source], emit: Emit) -> dict:
-    """1ターン分の調査と回答。返り値は保存・表示用の assistant ターン。"""
+def run_turn(
+    history: list[dict],
+    question: str,
+    sources: list[Source],
+    emit: Emit,
+    scopes: dict[str, list[str]] | None = None,
+) -> dict:
+    """1ターン分の調査と回答。返り値は保存・表示用の assistant ターン。
+
+    scopes はソースIDごとの検索範囲。書かれていないソースは絞らない。
+
+    trace（LLMとのやりとり）は大きいので、保存する側が会話とは分けて保存する。
+    """
+    started = time.monotonic()
+    trace = Trace()
     questions = [t["content"] for t in history if t["role"] == "user"] + [question]
     with ThreadPoolExecutor(max_workers=len(sources)) as pool:
-        reports = list(pool.map(lambda s: run_member(s, questions, emit), sources))
+        reports = list(pool.map(lambda s: run_member(s, questions, emit, trace, (scopes or {}).get(s.id)), sources))
 
     director = characters.director()
     emit({"type": "director_start", "agent": director.name})
-    answer = run_director(director, history, questions, reports, sources, emit)
-    followups = answer.pop("followups")
-    return {"role": "assistant", "agent": director.name, **answer, "reports": reports + followups}
+    answer = run_director(director, history, questions, reports, sources, emit, trace)
+    reports += answer.pop("followups")
+    return {
+        "role": "assistant",
+        "agent": director.name,
+        **answer,
+        "reports": reports,
+        "links": links.verify(answer["content"], reports),
+        "seconds": round(time.monotonic() - started, 2),
+        "llm_calls": len(trace.calls),
+        "trace": trace.calls,
+    }

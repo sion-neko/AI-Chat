@@ -3,7 +3,7 @@
 from app.sources import dummy, github, gitlab, mcp_servers, zulip
 from app.sources.base import Source
 
-__all__ = ["ALL_SOURCES", "Source", "SourceError", "check", "describe", "resolve", "status"]
+__all__ = ["ALL_SOURCES", "Source", "SourceError", "check", "describe", "resolve", "resolve_scopes", "scope_choices", "status"]
 
 ALL_SOURCES: list[Source] = [dummy.CHAT, dummy.WIKI, github.GITHUB, gitlab.GITLAB, zulip.ZULIP, *mcp_servers.load()]
 
@@ -13,8 +13,8 @@ class SourceError(Exception):
 
 
 def describe() -> list[dict]:
-    """画面に出すソースの一覧。設定がそろっていないソースは出さない。"""
-    return [{"id": s.id, "label": s.label} for s in ALL_SOURCES if s.configured]
+    """画面に出すソースの一覧。設定がそろっていないソースは出さない。scope_label は範囲を選べるソースだけ。"""
+    return [{"id": s.id, "label": s.label, "scope_label": s.scope_label if s.scopes else ""} for s in ALL_SOURCES if s.configured]
 
 
 def status() -> list[dict]:
@@ -32,6 +32,24 @@ def check(source: Source) -> dict:
         return {"state": "ok", "message": source.check()}
     except Exception as e:
         return {"state": "error", "message": str(e)}
+
+
+def scope_choices(source_id: str) -> list[str]:
+    """ソースの検索範囲の候補。範囲を選べないソースなら SourceError。"""
+    [source] = resolve([source_id])
+    if not source.scopes:
+        raise SourceError(f"範囲を選べないソースです: {source_id}")
+    return source.scopes()
+
+
+def resolve_scopes(selected: list[Source], scopes: dict) -> dict[str, list[str]]:
+    """画面から届いた検索範囲を確かめる。選んでいないソースや、範囲を選べないソースの分は捨てる。"""
+    result = {}
+    for source in selected:
+        names = scopes.get(source.id) or []
+        if source.scopes and isinstance(names, list) and all(isinstance(n, str) for n in names) and names:
+            result[source.id] = names
+    return result
 
 
 def resolve(source_ids: list[str]) -> list[Source]:

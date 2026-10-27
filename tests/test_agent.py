@@ -8,7 +8,19 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 with mock.patch.dict(os.environ, {"LLM_BASE_URL": "http://unused.invalid/v1", "LLM_API_KEY": "x", "LLM_MODEL": "fake"}):
     from app import agent, db
-from app.sources import dummy
+from langchain_core.tools import tool
+
+from app.sources import dummy, scope
+from app.sources.base import Source
+
+
+@tool
+def search_scoped(query: str) -> str:
+    """選ばれた範囲を返すだけの検索ツール。"""
+    return f"範囲: {scope.get()}"
+
+
+SCOPED = Source(id="scoped", label="範囲つき", tools=[search_scoped], configured=True, scopes=lambda: [], scope_label="リポジトリ")
 
 
 class FakeLLM:
@@ -67,6 +79,19 @@ class AgentTest(unittest.TestCase):
         self.assertEqual([r["source"] for r in turn["reports"]], ["dummy_chat", "dummy_wiki"])
         self.assertEqual(llm.director_calls, 1)
 
+        # 所員2人 × (検索の判断 + 報告) と所長1回。誰の呼び出しかと、送った内容が残る
+        whos = [c["who"] for c in turn["trace"]]
+        self.assertEqual(turn["llm_calls"], 5)
+        self.assertCountEqual(whos, ["シロ所長", "コソリ（ダミーWiki）", "コソリ（ダミーWiki）", "ポルタ（ダミーチャット）", "ポルタ（ダミーチャット）"])
+        director_call = turn["trace"][whos.index("シロ所長")]
+        self.assertEqual(director_call["tools"], ["request_reinvestigation"])
+        self.assertEqual(director_call["messages"][0]["role"], "system")
+        self.assertEqual(director_call["response"]["content"], "回答")
+        member_call = next(c for c in turn["trace"] if c["response"].get("tool_calls"))
+        self.assertEqual(member_call["response"]["tool_calls"][0]["args"], {"query": "ディスク"})
+        self.assertIn("seconds", turn["reports"][0]["steps"][0])
+        self.assertGreaterEqual(turn["seconds"], turn["reports"][0]["seconds"])
+
     def test_followup_runs_member_again_then_answers(self):
         llm = FakeLLM([{"source": "dummy_chat", "instruction": "10月に絞って"}, {"source": "nope", "instruction": "x"}])
         turn = self.run_turn(llm)
@@ -82,6 +107,21 @@ class AgentTest(unittest.TestCase):
         # 再調査の後にもう一度まとめ始め、回答が流れてくる
         self.assertEqual(types[-2:], ["director_start", "delta"])
         self.assertEqual(self.events[-1]["text"], "回答")
+
+    def test_scope_reaches_tools_in_each_member(self):
+        llm = FakeLLM([{"source": "scoped", "instruction": "もう一度"}])
+        with mock.patch.object(agent, "_llm", llm):
+            turn = agent.run_turn([], "VPN", [SCOPED, dummy.CHAT], self.events.append, {"scoped": ["me/infra"]})
+
+        scoped = [r for r in turn["reports"] if r["source"] == "scoped"]
+        # 最初の調査も、再調査も、選んだ範囲で検索する
+        self.assertEqual([r["steps"][0]["result"] for r in scoped], ["範囲: ['me/infra']"] * 2)
+        self.assertEqual([r.get("scope") for r in scoped], [["me/infra"]] * 2)
+        # 範囲を選んでいない所員は絞らない
+        chat = next(r for r in turn["reports"] if r["source"] == "dummy_chat")
+        self.assertNotIn("scope", chat)
+        prompt = next(c for c in turn["trace"] if c["who"].endswith("（範囲つき）"))["messages"][1]["content"]
+        self.assertIn("検索範囲（リポジトリ）は次に絞られています: me/infra", prompt)
 
     def test_cancel_stops_whole_turn(self):
         def emit(event):
