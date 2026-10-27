@@ -5,6 +5,7 @@
 - 所長に再調査のツールが渡され、質問に「再調査」が含まれていれば、全所員に再調査を頼む
 - 所長の受付（ask_user が渡される）では、質問に「あの件」が含まれていれば聞き返し、そうでなければ調べる
 - 所長のメモ（remember が渡される）では、質問に「覚えて」が含まれていればメモに書き足し、そうでなければ何もしない
+- 画像を見せられたら、決まった読み取り結果を返す
 - 直前がツール結果なら、その結果を要約したことにして最終回答を返す
 - ツールなしで呼ばれたら、受け取った内容をそのまま返す
 - stream: true なら、同じ内容を少しずつSSEで返す（画面で逐次表示を確かめられるよう、間を置く）
@@ -31,9 +32,23 @@ def _call(name: str, args: dict) -> dict:
     return {"id": f"call_{uuid.uuid4().hex[:8]}", "type": "function", "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
 
 
+def _text(content) -> str:
+    """メッセージの内容を文字列にする（画像つきのときは、文字の部分だけをつなげる）。"""
+    if isinstance(content, list):
+        return "\n".join(part.get("text", "") for part in content if part.get("type") == "text")
+    return content or ""
+
+
 def respond(req: dict) -> dict:
     model = req.get("model", "mock")
-    last = req["messages"][-1]
+    last = {**req["messages"][-1], "content": _text(req["messages"][-1].get("content"))}
+
+    # 画像を見せられたら、読み取ったことにして返す
+    raw = req["messages"][-1].get("content")
+    if isinstance(raw, list) and any(part.get("type") == "image_url" for part in raw):
+        content = "[mock] 画像の内容: エラー画面。「Disk quota exceeded」と表示されている（mon01、2026-10-07 03:12）"
+        return _completion(model, {"role": "assistant", "content": content}, "stop")
+
     all_tools = {t["function"]["name"]: t["function"] for t in req.get("tools") or []}
     tools = [name for name, f in all_tools.items() if set(f["parameters"].get("required", [])) <= {"query"}]
 

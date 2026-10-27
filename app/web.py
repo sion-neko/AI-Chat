@@ -4,7 +4,7 @@ API:
   GET    /api/config
   GET    /api/conversations?q=&archived=1&folder= 会話一覧。q は空白区切りのANDで、タイトルと中身を探す。folder でフォルダを絞る
   PATCH  /api/conversations/{id}          {title?, archived?, folder_id?} 名前・アーカイブ・フォルダを変える（folder_id: null でフォルダの外へ）
-  POST   /api/conversations               {content, sources, folder_id?} 新しい会話を作って最初の質問をする
+  POST   /api/conversations               {content, sources, folder_id?, images?} 新しい会話を作って最初の質問をする
   GET    /api/folders                     フォルダの一覧
   POST   /api/folders                     {name} フォルダを作る
   PATCH  /api/folders/{id}                {name?, memo?, selection?}
@@ -13,8 +13,10 @@ API:
   PATCH  /api/settings                    {memo?, selection?}
   GET    /api/conversations/{id}          会話の中身（ターン単位）
   GET    /api/traces/{trace_id}           1ターン分のLLMとのやりとり
-  POST   /api/conversations/{id}/messages {content, sources, from_turn?} 続きの質問をする
+  POST   /api/conversations/{id}/messages {content, sources, from_turn?, images?} 続きの質問をする
                                           from_turn（質問のターンの位置）があれば、そこから後を消して質問し直す（成功したときだけ置き換える）
+                                          画像を送らずにやり直したときは、元の質問の画像を使う
+  GET    /api/images/{id}                 質問に添えられた画像
   DELETE /api/conversations/{id}
   POST   /api/turns/{turn_id}/cancel        調査中のターンを中止する（turn_id は start イベントで届く）
   GET    /api/characters                  所長と所員（使えるソースの分）
@@ -25,11 +27,13 @@ API:
   POST   /api/check                       LLMと設定済みのソースに実際につないでみる
 
 skip_clarify: true なら所長は聞き返さずに調べる。
+images は質問に添える画像（data URL の配列。4枚・1枚5MBまで）。画像を読めるモデル（app/models.json）のときだけ受け付ける。
 sources は検索に使うソースIDの配列。scopes は {ソースID: [リポジトリやチャンネルの名前]}（省略可。ないソースは絞らない）。
 selection は入力欄の選択を覚えておく形 {"unchecked": [外したソースID], "scopes": {ソースID: [名前]}}。
 
 質問するPOSTは、進み具合をNDJSON（1行1イベント）で逐次返す。
   {"type": "start", "turn_id"}                  調査を始めた。中止するときに turn_id を使う
+  {"type": "images_start", "agent", "count"}    所長が添えられた画像を読んでいる
   {"type": "intake_start", "agent"}             所長が依頼を受け付けている（曖昧なら聞き返す）
   {"type": "member_start", "source", "agent"}   所員が調査を始めた
   {"type": "tool", "source", "tool", "args"}     所員が検索した
@@ -38,7 +42,7 @@ selection は入力欄の選択を覚えておく形 {"unchecked": [外したソ
   {"type": "followup", "source", "agent", "instruction"}  所長が所員に再調査を頼んだ（続いて member_start 〜 member_done が来る）
   {"type": "delta", "text"}                    所長の回答の続き（director_start で書き直しになる）
   {"type": "memo_start", "agent"}               所長がメモに書き足すことを考えている
-  {"type": "done", "conversation_id", "turn"}   回答（保存済み）
+  {"type": "done", "conversation_id", "question", "turn"}  質問と回答のターン（保存済み）
   {"type": "cancelled"}                         中止した（何も保存しない。新しい会話なら会話ごと消す）
   {"type": "error", "message"}
 入力の検証で弾くときは、ストリームを始める前に通常のJSONで400を返す。
@@ -56,7 +60,9 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from app import agent, characters, db, sources
+import base64
+
+from app import agent, characters, db, models, sources
 
 STATIC_DIR = Path(__file__).parent / "static"
 CONTENT_TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
@@ -64,10 +70,38 @@ TITLE_LENGTH = 40
 FOLDER_NAME_LENGTH = 40
 # メモはそのままプロンプトに入るので、ローカルLLMの文脈を使い切らない長さに抑える
 MEMO_LENGTH = 2000
+# 質問に添えられる画像の枚数と大きさ
+IMAGE_COUNT = 4
+IMAGE_SIZE = 5 * 1024 * 1024
+IMAGE_URL = re.compile(r"data:(image/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)")
 
 
 class InputError(Exception):
     """リクエストの中身が不正。メッセージはそのまま画面に出る。"""
+
+
+def _images(value) -> list[tuple[str, bytes]]:
+    """質問に添えられた画像（data URL の配列）を確かめて、(MIMEタイプ, バイト列) にする。"""
+    if not value:
+        return []
+    if not models.vision():
+        raise InputError(f"今のモデル（{os.environ['LLM_MODEL']}）は画像を読めません")
+    if not isinstance(value, list) or len(value) > IMAGE_COUNT:
+        raise InputError(f"画像は{IMAGE_COUNT}枚までにしてください")
+    images = []
+    for url in value:
+        m = IMAGE_URL.fullmatch(str(url))
+        if not m:
+            raise InputError("画像は PNG・JPEG・WebP・GIF にしてください")
+        data = base64.b64decode(m[2])
+        if len(data) > IMAGE_SIZE:
+            raise InputError(f"画像は1枚{IMAGE_SIZE // 1024 // 1024}MBまでにしてください")
+        images.append((m[1], data))
+    return images
+
+
+def _data_url(mime: str, data: bytes) -> str:
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
 
 
 def _name(value, length: int) -> str:
@@ -170,6 +204,8 @@ RUNNING: dict[str, threading.Event] = {}
 def config() -> dict:
     return {
         "model": os.environ["LLM_MODEL"],
+        # 今のモデルが画像を読めるか（app/models.json）。読めるときだけ画面で画像を添えられる
+        "vision": models.vision(),
         "director": characters.director().name,
         "sources": [{**s, "agent": characters.member(s["id"], s["label"]).name} for s in sources.describe()],
     }
@@ -270,6 +306,17 @@ class Handler(BaseHTTPRequestHandler):
             if trace is None:
                 return self._send_json(404, {"error": "not found"})
             return self._send_json(200, trace)
+        if m := re.fullmatch(r"/api/images/(\w+)", self.path):
+            image = db.load_image(m[1])
+            if image is None:
+                return self.send_error(404)
+            mime, data = image
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "private, max-age=86400")
+            self.end_headers()
+            return self.wfile.write(data)
 
         name = "index.html" if self.path == "/" else self.path.removeprefix("/static/")
         path = (STATIC_DIR / name).resolve()
@@ -284,8 +331,11 @@ class Handler(BaseHTTPRequestHandler):
             selected = sources.resolve(req["sources"])
             scopes = sources.resolve_scopes(selected, req.get("scopes") or {})
             folder_id = _folder_id(req.get("folder_id"))
+            images = _images(req.get("images"))
             conv_id = db.create_conversation(req["content"][:TITLE_LENGTH], folder_id)
-            return self._stream_turn(conv_id, [], req["content"], selected, scopes, is_new=True, clarify=not req.get("skip_clarify"))
+            return self._stream_turn(
+                conv_id, [], req["content"], selected, scopes, is_new=True, clarify=not req.get("skip_clarify"), images=images
+            )
         if m := re.fullmatch(r"/api/conversations/(\w+)/messages", self.path):
             history = db.load_turns(m[1])
             if history is None:
@@ -293,13 +343,28 @@ class Handler(BaseHTTPRequestHandler):
             req = self._read_json()
             selected = sources.resolve(req["sources"])
             scopes = sources.resolve_scopes(selected, req.get("scopes") or {})
+            images = _images(req.get("images"))
+            image_ids = None
             start = req.get("from_turn")
             if start is not None:
                 if not (isinstance(start, int) and 0 <= start < len(history) and history[start]["role"] == "user"):
                     raise InputError("やり直す質問の位置が正しくありません")
+                # やり直しで画像を送り直さなかったときは、元の質問の画像をそのまま使う
+                if not images and history[start].get("images"):
+                    image_ids = history[start]["images"]
+                    images = [db.load_image(i) for i in image_ids]
                 history = history[:start]
             return self._stream_turn(
-                m[1], history, req["content"], selected, scopes, is_new=False, replace_from=start, clarify=not req.get("skip_clarify")
+                m[1],
+                history,
+                req["content"],
+                selected,
+                scopes,
+                is_new=False,
+                replace_from=start,
+                clarify=not req.get("skip_clarify"),
+                images=images,
+                image_ids=image_ids,
             )
         if self.path == "/api/folders":
             folder_id = db.create_folder(_name(self._read_json().get("name", ""), FOLDER_NAME_LENGTH))
@@ -363,10 +428,13 @@ class Handler(BaseHTTPRequestHandler):
         is_new: bool,
         replace_from: int | None = None,
         clarify: bool = True,
+        images: list[tuple[str, bytes]] | None = None,
+        image_ids: list[str] | None = None,
     ):
         """調査を別スレッドで走らせ、キューに溜まったイベントを1行ずつ書き出す。
 
         所員は並列で動くので、レスポンスへの書き込みはこのスレッドだけで行う。
+        images は質問に添えられた画像。調査が成功したときだけ保存する（image_ids があれば、保存済みの同じ画像）。
         """
         events: queue.Queue[dict | None] = queue.Queue()
         turn_id = uuid.uuid4().hex
@@ -380,16 +448,21 @@ class Handler(BaseHTTPRequestHandler):
 
         def work():
             try:
-                turn = agent.run_turn(history, question, selected, emit, scopes, clarify, memos_for(conv_id, None))
+                urls = [_data_url(mime, data) for mime, data in images or []]
+                turn = agent.run_turn(history, question, selected, emit, scopes, clarify, memos_for(conv_id, None), urls)
                 turn["trace_id"] = db.save_trace(conv_id, turn.pop("trace"))
                 if "memo_notes" in turn:
                     turn["memo_added"] = add_to_memo(conv_id, turn.pop("memo_notes"))
-                new_turns = [{"role": "user", "content": question}, turn]
+                asked = {"role": "user", "content": question}
+                if images:
+                    asked["images"] = image_ids or [db.save_image(conv_id, mime, data) for mime, data in images]
+                    asked["image_text"] = turn.pop("image_text", "")
+                new_turns = [asked, turn]
                 if replace_from is None:
                     db.append_turns(conv_id, new_turns)
                 else:
                     db.replace_turns(conv_id, replace_from, new_turns)
-                events.put({"type": "done", "conversation_id": conv_id, "turn": turn})
+                events.put({"type": "done", "conversation_id": conv_id, "question": asked, "turn": turn})
             except agent.Cancelled:
                 if is_new:
                     db.delete_conversation(conv_id)

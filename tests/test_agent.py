@@ -46,6 +46,8 @@ class FakeLLM:
     def invoke(self, messages):
         names = [t["function"]["name"] if isinstance(t, dict) else t.name for t in self.tools]
         last = messages[-1]
+        if isinstance(last.content, list):  # 画像を読む
+            return AIMessage("エラー画面。「Disk quota exceeded」（mon01）")
         if names == ["ask_user"]:  # 所長の受付
             if self.ask:
                 return AIMessage("", tool_calls=[{"id": "a1", "name": "ask_user", "args": {"question": self.ask}}])
@@ -206,6 +208,53 @@ class AgentTest(unittest.TestCase):
         with mock.patch.object(agent, "_llm", FakeLLM([], ask="どの件ですか？", notes=[{"scope": "global", "note": "x"}])):
             turn = agent.run_turn([], "あの件", [dummy.CHAT], self.events.append)
         self.assertNotIn("memo_notes", turn)
+
+    def test_question_images_are_read_once_and_passed_as_text(self):
+        image = "data:image/png;base64,iVBORw0KGgo="
+        with mock.patch.object(agent, "_llm", FakeLLM([])):
+            turn = agent.run_turn([], "これ前にもあった？", [dummy.CHAT, dummy.WIKI], self.events.append, images=[image, image])
+
+        self.assertEqual(turn["image_text"], "画像1:\nエラー画面。「Disk quota exceeded」（mon01）\n\n画像2:\nエラー画面。「Disk quota exceeded」（mon01）")
+        whos = [c["who"] for c in turn["trace"]]
+        self.assertEqual(whos.count("シロ所長（画像）"), 2)
+        # 記録には画像そのものは入れず、枚数だけ
+        image_call = turn["trace"][whos.index("シロ所長（画像）")]
+        self.assertIn("[画像1枚]", image_call["messages"][0]["content"])
+        self.assertNotIn("base64", str(turn["trace"]))
+        # 所員と所長には文字に起こした内容が届く
+        member = next(c for c in turn["trace"] if c["who"].startswith("ポルタ"))
+        self.assertIn("Disk quota exceeded", member["messages"][1]["content"])
+        director = next(c for c in turn["trace"] if c["who"] == "シロ所長")
+        self.assertIn("Disk quota exceeded", director["messages"][-1]["content"])
+        self.assertEqual(self.events[0]["type"], "images_start")
+
+    def test_image_text_in_history(self):
+        history = [{"role": "user", "content": "これ何？", "image_text": "エラー画面"}, {"role": "assistant", "content": "障害です"}]
+        self.assertEqual(agent.member_questions(history, "その後は？")[0], "これ何？\n\n（添えられた画像の内容）\nエラー画面")
+
+    def test_view_image_tool_only_with_vision_model(self):
+        fetched = []
+
+        def fetch(url):
+            fetched.append(url)
+            return b"\x89PNG", "image/png"
+
+        source = Source(id="pics", label="写真", tools=[dummy.search_dummy_chat], configured=True, fetch_image=fetch)
+        tool = agent._view_image_tool(source, agent.Trace(), "ポルタ（写真）")
+        with mock.patch.object(agent, "_llm", FakeLLM([])):
+            self.assertIn("Disk quota exceeded", tool.invoke({"url": "/user_uploads/1/a.png"}))
+            for _ in range(agent.VIEW_IMAGE_LIMIT - 1):
+                tool.invoke({"url": "/user_uploads/1/b.png"})
+            with self.assertRaisesRegex(agent.ApiError, "枚まで"):
+                tool.invoke({"url": "/user_uploads/1/c.png"})
+        self.assertEqual(len(fetched), agent.VIEW_IMAGE_LIMIT)
+
+        # 画像を読めないモデルなら、所員に view_image を渡さない
+        for model, expected in (("llama-3.3-70b", False), ("qwen2.5-vl-72b", True)):
+            with mock.patch.dict(os.environ, {"LLM_MODEL": model}), mock.patch.object(agent, "_llm", FakeLLM([])):
+                turn = agent.run_turn([], "ディスク", [source], self.events.append, clarify=False)
+            member = next(c for c in turn["trace"] if c["who"].endswith("（写真）"))
+            self.assertEqual("view_image" in member["tools"], expected, model)
 
     def test_cancel_stops_whole_turn(self):
         def emit(event):

@@ -3,7 +3,7 @@ import unittest
 from unittest import mock
 
 from app.sources import gitlab, scope
-from tests.fake_api import FakeApi
+from tests.fake_api import FakeApi, Raw
 
 
 def item(iid, ref, updated_at):
@@ -16,7 +16,7 @@ def item(iid, ref, updated_at):
         "created_at": "2026-10-01T00:00:00Z",
         "updated_at": updated_at,
         "description": "手順",
-        "web_url": f"https://gitlab.example.com/{ref}",
+        "web_url": "https://gitlab.example.com/" + ref.replace("#", "/-/issues/").replace("!", "/-/merge_requests/"),
     }
 
 
@@ -70,6 +70,25 @@ class GitLabTest(unittest.TestCase):
         api = self.serve({"/api/v4/projects": [{"path_with_namespace": "infra/tools"}]})
         self.assertEqual(gitlab.scopes(), ["infra/tools"])
         self.assertEqual(api.requests[0]["params"]["membership"], "true")
+
+    def test_relative_uploads_become_absolute(self):
+        issue = {**ISSUE, "description": "画面です ![graph](/uploads/0123456789abcdef0123456789abcdef/graph.png)"}
+        notes = [{"author": {"username": "sato"}, "created_at": "2026-10-09T00:00:00Z", "body": "![x](/uploads/0123456789abcdef0123456789abcdef/x.png)"}]
+        self.serve({"/api/v4/projects/infra%2Ftools/issues/3": issue, "/api/v4/projects/infra%2Ftools/issues/3/notes": notes})
+        result = gitlab.get_gitlab_item.invoke({"project": "infra/tools", "iid": 3, "kind": "issue"})
+        self.assertIn("(https://gitlab.example.com/infra/tools/uploads/0123456789abcdef0123456789abcdef/graph.png)", result["body"])
+        self.assertIn("(https://gitlab.example.com/infra/tools/uploads/", result["comments"][0]["body"])
+
+    def test_fetch_image_through_api(self):
+        api = self.serve({"/api/v4/projects/infra%2Ftools/uploads/0123456789abcdef0123456789abcdef/graph.png": Raw(b"\x89PNG", "image/png")})
+        for url in (
+            f"{api.url}/infra/tools/uploads/0123456789abcdef0123456789abcdef/graph.png",
+            f"{api.url}/infra/tools/-/uploads/0123456789abcdef0123456789abcdef/graph.png",
+        ):
+            self.assertEqual(gitlab.fetch_image(url), (b"\x89PNG", "image/png"))
+        self.assertEqual(api.requests[0]["headers"]["private-token"], "t0ken")
+        with self.assertRaisesRegex(Exception, "uploads"):
+            gitlab.fetch_image("https://elsewhere.example.com/infra/tools/uploads/0123456789abcdef0123456789abcdef/x.png")
 
     def test_get_item_with_notes(self):
         notes = [{"author": {"username": "sato"}, "created_at": "2026-10-09T00:00:00Z", "system": True, "body": "merged"}]

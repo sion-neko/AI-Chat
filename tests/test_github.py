@@ -5,7 +5,7 @@ from unittest import mock
 from app import sources
 from app.sources import github, scope
 from app.sources.http import ApiError
-from tests.fake_api import FakeApi
+from tests.fake_api import FakeApi, Raw
 
 ISSUE = {
     "number": 7,
@@ -75,6 +75,26 @@ class GitHubTest(unittest.TestCase):
         api = self.serve({"/user/repos": [{"full_name": "me/infra"}, {"full_name": "org/app"}]})
         self.assertEqual(github.scopes(), ["me/infra", "org/app"])
         self.assertEqual(api.requests[0]["params"]["sort"], "pushed")
+
+    def test_fetch_image_does_not_send_token_to_redirect_target(self):
+        storage = FakeApi({"/signed/x.png": Raw(b"\x89PNG", "image/png")}).__enter__()
+        self.addCleanup(storage.__exit__)
+        api = self.serve({"/user-attachments/assets/abc": Raw(status=302, headers={"Location": f"{storage.url}/signed/x.png"})})
+
+        data, mime = github.fetch_image(f"{api.url}/user-attachments/assets/abc")
+        self.assertEqual((data, mime), (b"\x89PNG", "image/png"))
+        self.assertEqual(api.requests[0]["headers"]["authorization"], "Bearer t0ken")
+        self.assertNotIn("authorization", storage.requests[0]["headers"])
+
+    def test_fetch_image_only_from_github(self):
+        self.serve({})
+        with self.assertRaisesRegex(ApiError, "GitHubに貼られた画像"):
+            github.fetch_image("https://evil.example.com/x.png")
+
+    def test_fetch_image_rejects_non_images(self):
+        api = self.serve({"/user-attachments/assets/abc": Raw(b"<html>", "text/html")})
+        with self.assertRaisesRegex(ApiError, "画像ではありません"):
+            github.fetch_image(f"{api.url}/user-attachments/assets/abc")
 
     def test_check(self):
         self.serve({"/user": {"login": "sion"}})

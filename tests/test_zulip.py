@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from unittest import mock
 
 from app.sources import scope, zulip
-from tests.fake_api import FakeApi
+from tests.fake_api import FakeApi, Raw
 
 
 def message(id, day, content, **extra):
@@ -65,6 +65,19 @@ class ZulipTest(unittest.TestCase):
         self.addCleanup(scope.set, None)
         with self.assertRaisesRegex(Exception, "検索範囲の外"):
             zulip.search_zulip.invoke({"query": "x", "channel": "general"})
+
+    def test_fetch_image_via_temporary_url(self):
+        self.api.routes["/api/v1/user_uploads/2/ab/graph.png"] = {"url": "/user_uploads/temporary/xyz/graph.png"}
+        self.api.routes["/user_uploads/temporary/xyz/graph.png"] = Raw(b"\x89PNG", "image/png")
+        for url in ("/user_uploads/2/ab/graph.png", f"{self.api.url}/user_uploads/2/ab/graph.png"):
+            self.assertEqual(zulip.fetch_image(url), (b"\x89PNG", "image/png"))
+        # 一時的なURLをもらうときだけ認証する
+        self.assertIn("authorization", self.api.requests[0]["headers"])
+        self.assertNotIn("authorization", self.api.requests[1]["headers"])
+
+    def test_fetch_image_only_uploads(self):
+        with self.assertRaisesRegex(Exception, "user_uploads"):
+            zulip.fetch_image("https://example.com/x.png")
 
     def test_topic_oldest_first(self):
         results = zulip.get_zulip_topic.invoke({"channel": "infra.ops", "topic": "ディスク (監視)"})

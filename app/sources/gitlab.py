@@ -7,6 +7,7 @@
 """
 
 import os
+import re
 import urllib.parse
 from typing import Literal
 
@@ -30,7 +31,18 @@ def _quote(path: str) -> str:
     return urllib.parse.quote(path, safe="")
 
 
+def _absolute_uploads(text: str | None, project_url: str) -> str:
+    """本文に貼られた画像は「/uploads/...」とプロジェクトからの相対URLで書かれるので、どこの画像か分かる形にする。"""
+    return re.sub(r"\]\(/uploads/", f"]({project_url}/uploads/", text or "")
+
+
+def _project_url(web_url: str) -> str:
+    """IssueやMRのURL（.../infra/tools/-/issues/3）から、プロジェクトのURLを取り出す。"""
+    return web_url.split("/-/", 1)[0]
+
+
 def _summary(item: dict, kind: str, body_limit: int) -> dict:
+    item = {**item, "description": _absolute_uploads(item.get("description"), _project_url(item["web_url"]))}
     return {
         "kind": kind,
         "ref": item["references"]["full"],
@@ -95,7 +107,7 @@ def get_gitlab_item(project: str, iid: int, kind: Literal["issue", "merge_reques
             "author": (n.get("author") or {}).get("username"),
             "created_at": n["created_at"],
             "system": n.get("system", False),
-            "body": http.clip(n.get("body"), 1000),
+            "body": http.clip(_absolute_uploads(n.get("body"), _project_url(item["url"])), 1000),
         }
         for n in notes
     ]
@@ -116,6 +128,19 @@ def scopes() -> list[str]:
     return [p["path_with_namespace"] for p in projects]
 
 
+def fetch_image(url: str) -> tuple[bytes, str]:
+    """Issue・MRに貼られた画像（プロジェクト/uploads/秘密の文字列/ファイル名）を、APIから取ってくる。
+
+    画面用のURLはトークンでは開けないので、同じファイルをAPI（GitLab 17.4以降）で取る。
+    """
+    base = os.environ["GITLAB_URL"].rstrip("/")
+    m = re.fullmatch(rf"{re.escape(base)}/(?P<project>.+?)(?:/-)?/uploads/(?P<secret>[0-9a-f]{{32}})/(?P<name>[^/?#]+)", url)
+    if not m:
+        raise http.ApiError("GitLabに貼られた画像（…/uploads/… のURL）ではありません")
+    api_url = f"{base}/api/v4/projects/{_quote(m['project'])}/uploads/{m['secret']}/{m['name']}"
+    return http.get_image(api_url, {"PRIVATE-TOKEN": os.environ["GITLAB_TOKEN"]})
+
+
 GITLAB = Source(
     id="gitlab",
     label="GitLab",
@@ -125,4 +150,5 @@ GITLAB = Source(
     check=check,
     scopes=scopes,
     scope_label="プロジェクト",
+    fetch_image=fetch_image,
 )

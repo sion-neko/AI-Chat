@@ -11,6 +11,10 @@
 
 所長と所員のプロンプトには、事務所のメモ（全体と、調査が入っているフォルダの分）を入れる。
 
+画像を読めるモデル（app/models.json）のときは:
+  - 質問に添えられた画像を、受付の前に1回だけ文字に起こし、質問に添えて所長と所員に渡す
+  - 所員に view_image を持たせ、検索結果の中の画像を必要なときだけ読ませる（文字に起こして返す）
+
 進み具合は emit に渡したイベントで通知する。
 LLMとのやりとりは Trace に記録し、返り値の trace に入れる（あとから画面で確かめられるように）。
 """
@@ -21,14 +25,16 @@ from collections.abc import Callable
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 
+import base64
+
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.prebuilt.tool_node import ToolInvocationError
 
-from app import characters, links
+from app import characters, links, models
 from app.sources import Source
 from app.sources import scope as search_scope
 from app.sources.http import ApiError
@@ -59,6 +65,11 @@ class Trace:
 
 def _message_view(msg) -> dict:
     view = {"role": msg.type, "content": msg.text}
+    # 画像は記録に入れない（大きいので）。何枚あったかだけ残す
+    if isinstance(msg.content, list):
+        images = sum(1 for b in msg.content if isinstance(b, dict) and b.get("type") == "image_url")
+        if images:
+            view["content"] += f"\n[画像{images}枚]"
     if getattr(msg, "tool_calls", None):
         view["tool_calls"] = [{"name": c["name"], "args": c["args"]} for c in msg.tool_calls]
     return view
@@ -74,6 +85,17 @@ class Cancelled(BaseException):
 MEMBER_RECURSION_LIMIT = 12
 # 所長が再調査を頼める回数（1ターンあたり）。頼んだ報告を受けたら必ず回答する
 FOLLOWUP_ROUNDS = 1
+# 所員1人が1回の調査で view_image で読める画像の枚数
+VIEW_IMAGE_LIMIT = 3
+
+IMAGE_PROMPT = """この画像に写っているものを、検索や調査に使えるよう文字に起こしてください。
+- 画面やエラーのスクリーンショットなら、表示されている文字（エラーメッセージ・画面名・ホスト名・日時など）をそのまま書き写す
+- グラフなら、何のグラフで、いつ・どう変化しているか
+- 図や写真なら、何が写っているか
+- 推測はしない。読み取れない部分は「読み取れない」と書く"""
+
+MEMBER_VISION_NOTE = """
+- 検索結果の画像（スクリーンショットやグラフ）が話の核心にありそうなときは、view_image で中身を読める。読むのは本当に必要な画像だけにする"""
 
 MEMBER_PROMPT = """あなたは「おばけ探偵事務所」の所員「{name}」です。{persona}
 担当は「{source}」です。依頼人の質問について、担当ソースだけを調べて所長に報告します。
@@ -132,6 +154,46 @@ _llm = ChatOpenAI(
 )
 
 
+def describe_image(data_url: str, purpose: str, trace: Trace, who: str) -> str:
+    """画像を読めるモデルに画像を見せ、写っている内容を文字で返す。purpose は何の画像かの説明。"""
+    content = [{"type": "text", "text": f"{IMAGE_PROMPT}\n\n{purpose}"}, {"type": "image_url", "image_url": {"url": data_url}}]
+    messages = [HumanMessage(content=content)]
+    started = time.monotonic()
+    answer = _llm.invoke(messages)
+    trace.record(who, messages, [], answer, time.monotonic() - started)
+    return answer.text.strip()
+
+
+def _data_url(data: bytes, mime: str) -> str:
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
+def _view_image_tool(source: Source, trace: Trace, who: str) -> BaseTool:
+    """所員が検索結果の画像を読むツール。画像はソースの認証で取ってきて、文字に起こして返す。
+
+    ツールの結果に画像をそのまま入れられないOpenAI互換サーバーも多いので、別の呼び出しで文字にする。
+    """
+    count = 0
+
+    def view_image(url: str) -> str:
+        nonlocal count
+        if count >= VIEW_IMAGE_LIMIT:
+            raise ApiError(f"画像を読めるのは1回の調査で{VIEW_IMAGE_LIMIT}枚までです。読んだ内容で報告してください")
+        count += 1
+        data, mime = source.fetch_image(url)
+        purpose = f"「{source.label}」の検索結果に含まれていた画像です（{url}）。"
+        return describe_image(_data_url(data, mime), purpose, trace, f"{who}（画像）")
+
+    return StructuredTool.from_function(
+        view_image,
+        name="view_image",
+        description=(
+            f"{source.label}の検索結果に含まれる画像（スクリーンショット・グラフ等）を見て、写っている内容を文字で返す。"
+            f"url は検索結果に書かれた画像のURL（相対URLも可）。1回の調査で{VIEW_IMAGE_LIMIT}枚まで"
+        ),
+    )
+
+
 def _tool_loop(system_prompt: str, tools: list[BaseTool], trace: Trace, who: str):
     llm = _llm.bind_tools(tools)
 
@@ -175,7 +237,13 @@ def run_member(
         report["request"] = followup["instruction"]
     emit({"type": "member_start", "source": source.id, "agent": character.name})
 
-    prompt = MEMBER_PROMPT.format(name=character.name, persona=character.persona, source=source.label, today=date.today()) + memo
+    who = f"{character.name}（{source.label}）"
+    tools = list(source.tools)
+    prompt = MEMBER_PROMPT.format(name=character.name, persona=character.persona, source=source.label, today=date.today())
+    if source.fetch_image and models.vision():
+        tools.append(_view_image_tool(source, trace, who))
+        prompt += MEMBER_VISION_NOTE
+    prompt += memo
     *earlier, current = questions
     request = f"今回の質問: {current}"
     if earlier:
@@ -190,7 +258,7 @@ def run_member(
     started = time.monotonic()
     called_at = {}  # ツール呼び出しID → 呼んだ時刻（結果が返るまでの時間を測る）
     try:
-        graph = _tool_loop(prompt, source.tools, trace, f"{character.name}（{source.label}）")
+        graph = _tool_loop(prompt, tools, trace, who)
         stream = graph.stream(
             {"messages": [HumanMessage(request)]},
             {"recursion_limit": MEMBER_RECURSION_LIMIT},
@@ -332,8 +400,15 @@ ASK_USER_TOOL = {
 }
 
 
+def user_text(turn: dict) -> str:
+    """依頼人のターンの文章。画像が添えられていれば、文字に起こした内容も付ける。"""
+    if turn.get("image_text"):
+        return f"{turn['content']}\n\n（添えられた画像の内容）\n{turn['image_text']}"
+    return turn["content"]
+
+
 def _history_messages(history: list[dict]) -> list:
-    return [HumanMessage(t["content"]) if t["role"] == "user" else AIMessage(t["content"]) for t in history]
+    return [HumanMessage(user_text(t)) if t["role"] == "user" else AIMessage(t["content"]) for t in history]
 
 
 def intake(director: characters.Character, history: list[dict], question: str, trace: Trace, memo: str = "") -> dict | None:
@@ -436,10 +511,19 @@ def member_questions(history: list[dict], question: str) -> list[str]:
             continue
         previous = history[i - 1] if 0 < i <= len(history) else None
         if previous and previous.get("kind") == "clarify":
-            questions.append(f"{t['content']}（所長の確認「{previous['content']}」への答え）")
+            questions.append(f"{user_text(t)}（所長の確認「{previous['content']}」への答え）")
         else:
-            questions.append(t["content"])
+            questions.append(user_text(t))
     return questions
+
+
+def read_images(images: list[str], director: characters.Character, emit: Emit, trace: Trace) -> str:
+    """質問に添えられた画像（data URL）を文字に起こす。画像が複数なら番号を付けてつなげる。"""
+    emit({"type": "images_start", "agent": director.name, "count": len(images)})
+    texts = [describe_image(image, "依頼人が質問に添えた画像です。", trace, f"{director.name}所長（画像）") for image in images]
+    if len(texts) == 1:
+        return texts[0]
+    return "\n\n".join(f"画像{i}:\n{text}" for i, text in enumerate(texts, 1))
 
 
 def run_turn(
@@ -450,11 +534,14 @@ def run_turn(
     scopes: dict[str, list[str]] | None = None,
     clarify: bool = True,
     memos: dict | None = None,
+    images: list[str] | None = None,
 ) -> dict:
     """1ターン分の調査と回答。返り値は保存・表示用の assistant ターン。
 
     scopes はソースIDごとの検索範囲。書かれていないソースは絞らない。
     memos は事務所のメモ（memo_section の形）。所長と所員のプロンプトに入る。
+    images は質問に添えられた画像（data URL）。最初に文字に起こし、返り値の image_text に入れる
+    （保存する側が依頼人のターンに移す。次のターンからは文字のほうを使う）。
     clarify が False なら聞き返さない（依頼人が「聞き返さずに調べる」を選んだとき）。
     直前に聞き返したばかりのときも、続けては聞き返さない。
     聞き返したときは kind: "clarify" のターンを返す（reports などは持たない）。
@@ -465,22 +552,26 @@ def run_turn(
     trace = Trace()
     director = characters.director()
     memo = memo_section(memos)
+    image_text = read_images(images, director, emit, trace) if images else ""
+    asked = user_text({"content": question, "image_text": image_text})
+    extra = {"image_text": image_text} if image_text else {}
 
     if clarify and not (history and history[-1].get("kind") == "clarify"):
         emit({"type": "intake_start", "agent": director.name})
-        if ask := intake(director, history, question, trace, memo):
+        if ask := intake(director, history, asked, trace, memo):
             return {
                 "role": "assistant",
                 "kind": "clarify",
                 "agent": director.name,
                 "content": ask["question"],
                 "model": ask["model"],
+                **extra,
                 "seconds": round(time.monotonic() - started, 2),
                 "llm_calls": len(trace.calls),
                 "trace": trace.calls,
             }
 
-    questions = member_questions(history, question)
+    questions = member_questions(history, asked)
     with ThreadPoolExecutor(max_workers=len(sources)) as pool:
         reports = list(pool.map(lambda s: run_member(s, questions, emit, trace, (scopes or {}).get(s.id), memo=memo), sources))
 
@@ -498,6 +589,7 @@ def run_turn(
         "links": links.verify(answer["content"], reports),
         # メモに書き足す内容。書き足すのは保存する側（メモの上限を見て、書けたかどうかに置き換える）
         "memo_notes": notes,
+        **extra,
         "seconds": round(time.monotonic() - started, 2),
         "llm_calls": len(trace.calls),
         "trace": trace.calls,
