@@ -271,6 +271,25 @@ def check() -> dict:
         return {"llm": llm.result(), "sources": results}
 
 
+# 画面を開いてよいホスト名。ほかの名前で届いたリクエストは断る（DNSリバインディングで、
+# 別のサイトから手元の会話を読まれないように）。ALLOWED_HOSTS（カンマ区切り）で足せる
+ALLOWED_HOSTS = {"localhost", "127.0.0.1", "[::1]", *filter(None, os.environ.get("ALLOWED_HOSTS", "").split(","))}
+
+
+def request_allowed(method: str, host: str | None, origin: str | None) -> bool:
+    """手元のブラウザでこのアプリの画面から来たリクエストか。
+
+    Host が許したホスト名でなければ断る。書き換えるリクエスト（GET以外）は、Origin があれば同じホストからのものに限る
+    （ほかのサイトに開かれたページから、調査を頼んだり消したりされないように）。
+    """
+    hostname = (host or "").rsplit(":", 1)[0] if not (host or "").endswith("]") else host
+    if hostname not in ALLOWED_HOSTS:
+        return False
+    if method != "GET" and origin and urllib.parse.urlsplit(origin).netloc != host:
+        return False
+    return True
+
+
 def _character_key(key: str) -> bool:
     return key == characters.DIRECTOR_KEY or key in {s["id"] for s in sources.describe()}
 
@@ -290,6 +309,8 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(int(self.headers["Content-Length"])))
 
     def _handle(self, fn):
+        if not request_allowed(self.command, self.headers.get("Host"), self.headers.get("Origin")):
+            return self._send_json(403, {"error": "このアプリは、自分のPCのブラウザから開いてください"})
         try:
             fn()
         except (sources.SourceError, characters.CharacterError, InputError, mcp_servers.McpConfigError) as e:
