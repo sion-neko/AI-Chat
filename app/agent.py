@@ -162,6 +162,11 @@ REMEMBER_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name
 # 1回の調査でメモに書き足す件数の上限
 REMEMBER_LIMIT = 3
 
+TITLE_PROMPT = """依頼人の質問と、それへの回答を読み、この調査にあとで一覧から探しやすい短い題名を付けてください。
+- {length}文字以内。何の件かが分かる名詞句にする（例: 監視サーバーのディスク増設、VPN証明書の更新手順）
+- 題名だけを1行で書く。かぎかっこや句点は付けない"""
+TITLE_LENGTH = 24
+
 # LLMを同時に呼ぶ数の上限。所員は並列に動くので、GPU1台のローカルLLMサーバーが詰まらないよう絞る
 LLM_CONCURRENCY = int(os.environ.get("LLM_CONCURRENCY") or 2)
 # 1回の呼び出しを待つ上限（秒）。サーバーが固まっても調査が終わらなくならないように
@@ -547,6 +552,23 @@ def remember(
         if call["name"] == "remember" and call["args"].get("scope") in allowed and note:
             notes.append({"scope": call["args"]["scope"], "note": note})
     return notes[:REMEMBER_LIMIT]
+
+
+def make_title(questions: list[str], answer: str) -> str | None:
+    """調査の題名を付ける。最初の質問がそのまま題名になると、「あの件どうなった？」のような一覧で見分けにくいものが並ぶため。
+
+    題名は補助なので、LLMの呼び出しに失敗したり、使えない題名が返ったりしたら None。
+    """
+    asked = "\n".join(f"- {q}" for q in questions)
+    messages = [SystemMessage(TITLE_PROMPT.format(length=TITLE_LENGTH)), HumanMessage(f"## 質問\n{asked}\n\n## 回答\n{answer[:2000]}")]
+    try:
+        with _llm_slot():
+            response = _llm.invoke(messages)
+    except Exception:
+        return None
+    lines = [line for line in response.text.splitlines() if line.strip()]
+    title = lines[0].strip().strip("「」『』\"'#*。 ") if lines else ""
+    return title[: TITLE_LENGTH * 2] or None
 
 
 def member_questions(history: list[dict], question: str) -> list[str]:

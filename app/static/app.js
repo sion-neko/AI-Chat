@@ -257,6 +257,7 @@ async function connectEvents() {
           wait = 1000;
           return lostJobs();
         }
+        if (event.type === "title") return onTitle(event);
         if (event.turn_id) onJobEvent(event);
       });
     } catch {
@@ -265,6 +266,13 @@ async function connectEvents() {
     eventsConnected = false;
     await new Promise((resolve) => setTimeout(resolve, wait));
   }
+}
+
+// 所長が調査に題名を付けた
+function onTitle({ conversation_id, title }) {
+  for (const c of [...conversations, openedConversation]) if (c?.id === conversation_id) c.title = title;
+  renderList();
+  if (conversation_id === currentId && !titleEl.querySelector("input")) renderHead();
 }
 
 function onJobEvent(event) {

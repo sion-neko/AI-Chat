@@ -59,6 +59,13 @@ def publish(job: Job, event: dict):
             q.put(event)
 
 
+def broadcast(event: dict):
+    """調査に紐づかない知らせ（調査の題名が付いた、など）を、つないでいる画面すべてに配る。溜めない。"""
+    with _lock:
+        for q in _listeners:
+            q.put(event)
+
+
 def get(turn_id: str) -> Job | None:
     with _lock:
         return _jobs.get(turn_id)

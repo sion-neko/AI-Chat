@@ -53,6 +53,7 @@ selection は入力欄の選択を覚えておく形 {"unchecked": [外したソ
   {"type": "cancelled", "conversation_id", "deleted"}  中止した（何も保存しない。新しい会話なら会話ごと消す: deleted）
   {"type": "error", "conversation_id", "deleted", "message"}
   {"type": "ready"}                             つないだときに、調査中のものを流し終えた（turn_id なし）
+  {"type": "title", "conversation_id", "title"}  所長が調査に題名を付けた（最初の回答のあと。turn_id なし）
   {"type": "ping"}                              何もないときにときどき来る（turn_id なし）
 入力の検証で弾くときは、ストリームを始める前に通常のJSONで400を返す。
 """
@@ -208,6 +209,19 @@ def followup_since(history: list[dict], conversation: dict) -> str:
     if not last or last["role"] != "assistant" or last.get("kind") == "clarify":
         raise InputError("続報を調べられるのは、所長が回答した後だけです")
     return last.get("date") or conversation["updated_at"][:10]
+
+
+def retitle(conv_id: str):
+    """最初の回答が出たら、所長に調査の題名を付けさせる（題名が最初の質問のままのときだけ。名前を変えていたら触らない）。"""
+    conversation = db.get_conversation(conv_id)
+    turns = db.load_turns(conv_id) or []
+    answers = [t for t in turns if t["role"] == "assistant" and t.get("kind") != "clarify"]
+    if not conversation or len(answers) != 1 or conversation["title"] != turns[0]["content"][:TITLE_LENGTH]:
+        return
+    questions = agent.member_questions(turns[:-2], turns[-2]["content"])
+    if title := agent.make_title(questions, answers[0]["content"]):
+        db.update_conversation(conv_id, title=title)
+        jobs.broadcast({"type": "title", "conversation_id": conv_id, "title": title})
 
 
 def memos_for(conv_id: str | None, folder_id: str | None) -> dict:
@@ -523,6 +537,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 画面で読むまで、一覧に印を出す（見ている画面が読んだら外す）
                 db.update_conversation(conv_id, unread=True)
                 jobs.publish(job, {"type": "done", "conversation_id": conv_id, "question": asked, "turn": turn})
+                retitle(conv_id)
             except agent.Cancelled:
                 if is_new:
                     db.delete_conversation(conv_id)
