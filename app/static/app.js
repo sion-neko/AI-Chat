@@ -220,7 +220,7 @@ function showJob(job) {
   if (replace) hideTurnsFrom(index);
   log.querySelector(".turn-error")?.remove();
   job.turnNode = append(turnView(question, index, { images: job.mine?.shownImages ?? [], followup, imageCount: job.mine ? 0 : image_count }));
-  job.view = progressView();
+  job.view = progressView(job.info.started_at);
   job.turnNode.append(job.view.node);
   for (const event of job.events) job.view.update(event);
   setSendButton();
@@ -553,14 +553,40 @@ let sourceList = [];
 
 async function loadConfig() {
   const c = await api("GET", "/api/config");
-  document.getElementById("model").textContent = c.model;
-  document.getElementById("model").title = c.vision ? "設定中のモデル（画像を読める）" : "設定中のモデル";
+  renderDestination(c);
   visionEnabled = c.vision;
   attachButton.hidden = !c.vision;
   directorName = c.director;
   sourceList = c.sources;
   sourceLabels = new Map(c.sources.map((s) => [s.id, s.label]));
   renderSources(c.sources);
+}
+
+// LLMの送り先。秘密の情報を入れてよいか判断できるよう、手元のネットワークの中か外かを出す
+const DESTINATIONS = {
+  local: ["ローカル", "手元のネットワークの中"],
+  external: ["外部", "インターネット上"],
+  unknown: ["不明", "送り先のアドレスが分からない場所"],
+};
+let destinationNote = "";
+
+function renderDestination({ model, vision, llm_url, destination: d }) {
+  const [label, where] = DESTINATIONS[d.kind];
+  const badge = document.getElementById("model");
+  badge.replaceChildren(el("span", `destination ${d.kind}`, label), el("span", "model-name", model));
+  const addresses = d.addresses.length ? `（${d.addresses.join(", ")}）` : "";
+  badge.title =
+    `質問と検索結果は、${where}のLLMに送ります。\n送り先: ${llm_url}${addresses}\nモデル: ${model}${vision ? "（画像を読める）" : ""}` +
+    (d.kind === "local" ? "" : "\n秘密の情報を入れる前に、送ってよい相手か確かめてください。");
+  destinationNote =
+    d.kind === "local"
+      ? `質問と検索結果は、${where}のLLM（${d.host}）にだけ送ります。`
+      : `質問と検索結果を、${where}のLLM（${d.host}）に送ります。秘密の情報を入れる前に確かめてください。`;
+  const note = document.getElementById("destination-note");
+  if (note) {
+    note.textContent = destinationNote;
+    note.className = `destination-note ${d.kind}`;
+  }
 }
 
 // 今のフォルダ。開いている調査があればそのフォルダ、なければサイドバーで選んでいるフォルダ
@@ -1163,6 +1189,7 @@ function renderHead(draft) {
   titleEl.classList.toggle("editable", Boolean(c));
   titleEl.title = c ? "クリックして名前を変える" : "";
   archiveButton.hidden = !c;
+  document.getElementById("export").hidden = !c;
   archiveButton.textContent = c?.archived ? "アーカイブから戻す" : "アーカイブ";
   const folder = activeFolder();
   crumb.hidden = !folder;
@@ -1175,6 +1202,57 @@ function renderHead(draft) {
     moveSelect.value = c.folder_id ?? "";
   }
 }
+
+// ---- 書き出し ----
+
+// 開いている調査を、質問・回答・出典のMarkdownにしてファイルに保存する
+document.getElementById("export").addEventListener("click", async () => {
+  const c = currentConversation();
+  if (!c) return;
+  const { turns } = await api("GET", `/api/conversations/${c.id}`);
+  const blob = new Blob([conversationMarkdown(c.title, turns)], { type: "text/markdown" });
+  const link = Object.assign(el("a"), { href: URL.createObjectURL(blob), download: `${fileName(c.title)}.md` });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+});
+
+function conversationMarkdown(title, turns) {
+  const lines = [`# ${title}`, ""];
+  for (const t of turns) {
+    if (t.role === "user") {
+      lines.push(`## 質問${t.since ? `（${t.since} 以降の続報）` : ""}`, "", t.content, "");
+      continue;
+    }
+    lines.push(`## ${t.agent}所長の${t.kind === "clarify" ? "確認" : "回答"}${t.date ? `（${t.date}）` : ""}`, "", t.content, "");
+    const found = (t.links ?? []).filter((l) => l.found);
+    if (found.length) {
+      lines.push("### 出典", "");
+      found.forEach((l, i) => lines.push(`${i + 1}. [${l.title || l.url}](${l.url})${[l.source, l.date].filter(Boolean).map((x) => ` · ${x}`).join("")}`));
+      lines.push("");
+    }
+  }
+  return lines.join("\n");
+}
+
+function fileName(title) {
+  return title.replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 60) || "調査";
+}
+
+// ---- キーボード ----
+
+document.addEventListener("keydown", (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && !e.shiftKey && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    search.focus();
+    search.select();
+  } else if (mod && e.shiftKey && e.key.toLowerCase() === "o") {
+    e.preventDefault();
+    startNew(viewFolderId);
+  }
+});
 
 function renameConversation() {
   const c = currentConversation();
@@ -1464,8 +1542,18 @@ function citations(answer, links) {
 }
 
 // 調査中の表示。所員ごとの状態と、届いた分の回答を出す
-function progressView() {
-  const { node, body, meta } = answerFrame(directorName);
+// startedAt は調査を始めた時刻（秒）。かかっている時間を出す（ローカルLLMは時間がかかるので、止まっていないと分かるように）
+function progressView(startedAt = Date.now() / 1000) {
+  const { node, body, meta: head } = answerFrame(directorName);
+  const meta = el("span");
+  const elapsed = el("span", "elapsed");
+  head.append(meta, elapsed);
+  const tick = () => {
+    elapsed.textContent = formatElapsed(Date.now() / 1000 - startedAt);
+  };
+  tick();
+  // 画面から外れたら（回答に置き換わった・別の会話を開いた）止める。作ってすぐ画面に足すので、最初の1秒の間には足されている
+  const timer = setInterval(() => (node.isConnected ? tick() : clearInterval(timer)), 1000);
   meta.textContent = "所員が調べています…";
   const answer = el("div", "markdown streaming");
   const record = el("details", "record");
@@ -1593,6 +1681,11 @@ function memberNote(report) {
   return [`検索${report.steps.length}回`, report.seconds !== undefined && formatSeconds(report.seconds)].filter(Boolean).join(" · ");
 }
 
+function formatElapsed(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  return s < 60 ? `${s}秒` : `${Math.floor(s / 60)}分${String(s % 60).padStart(2, "0")}秒`;
+}
+
 function formatSeconds(seconds) {
   return seconds < 60 ? `${seconds.toFixed(1)}秒` : `${Math.floor(seconds / 60)}分${Math.round(seconds % 60)}秒`;
 }
@@ -1708,15 +1801,23 @@ function el(tag, className, text) {
   return node;
 }
 
+// 自分で足したもの（質問など）は、読んでいた位置にかかわらず見せる
 function append(node) {
   log.append(node);
+  followBottom = true;
   scrollToBottom();
   return node;
 }
 
+// 一番下を見ているときだけ、届いた分に合わせて下へ送る（上の方を読んでいるときは動かさない）
 function scrollToBottom() {
-  log.scrollTop = log.scrollHeight;
+  if (followBottom) log.scrollTop = log.scrollHeight;
 }
+
+let followBottom = true;
+log.addEventListener("scroll", () => {
+  followBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+});
 
 function showEmpty() {
   openedConversation = null;
@@ -1744,7 +1845,9 @@ function showEmpty() {
   const note = folder
     ? "このフォルダの調査は、フォルダで選んだ調べる場所を引き継ぎます。"
     : "所員が選んだ場所を手分けして調べ、所長が経緯を根拠のリンクつきでまとめます。";
-  node.append(logo, el("h2", "", heading), el("p", "", note), examples);
+  const destination = el("p", "destination-note", destinationNote);
+  destination.id = "destination-note";
+  node.append(logo, el("h2", "", heading), el("p", "", note), examples, destination);
   log.replaceChildren(node);
 }
 

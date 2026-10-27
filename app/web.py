@@ -70,7 +70,7 @@ from pathlib import Path
 
 import base64
 
-from app import agent, characters, db, jobs, models, sources
+from app import agent, characters, db, destination, jobs, models, sources
 from app.sources import mcp_servers
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -221,6 +221,9 @@ def memos_for(conv_id: str | None, folder_id: str | None) -> dict:
 def config() -> dict:
     return {
         "model": os.environ["LLM_MODEL"],
+        # LLMの送り先が手元のネットワークの中か（app/destination.py）
+        "llm_url": os.environ["LLM_BASE_URL"],
+        "destination": destination.classify(os.environ["LLM_BASE_URL"]),
         # 今のモデルが画像を読めるか（app/models.json）。読めるときだけ画面で画像を添えられる
         "vision": models.vision(),
         "director": characters.director().name,

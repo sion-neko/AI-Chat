@@ -369,13 +369,33 @@ button.danger:hover { background: var(--error-soft); }
 }
 
 .model {
-  font-family: var(--font-mono);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: var(--text-xs);
   color: var(--muted);
-  padding: 1px 8px;
+  padding: 1px 8px 1px 3px;
   border: 1px solid var(--line);
   border-radius: 4px;
+  cursor: help;
 }
+
+.model-name { font-family: var(--font-mono); }
+
+/* LLMの送り先（ローカル・外部・不明） */
+.destination { padding: 0 6px; border-radius: 3px; font-weight: bold; line-height: 1.7; }
+
+.destination.local { color: var(--ok); background: var(--ok-soft); }
+
+.destination.external { color: var(--error); background: var(--error-soft); }
+
+.destination.unknown { color: var(--busy); background: var(--busy-soft); }
+
+.empty p.destination-note { margin-top: 28px; font-size: var(--text-xs); }
+
+.empty p.destination-note.external, .empty p.destination-note.unknown { color: var(--error); font-weight: bold; }
+
+.elapsed { margin-left: 8px; font-variant-numeric: tabular-nums; }
 
 .log { flex: 1; overflow-y: auto; padding: 28px 20px 12px; }
 

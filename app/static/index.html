@@ -15,8 +15,8 @@
         <div class="brand-sub">横断調査AIチャット</div>
       </div>
     </div>
-    <button id="new-chat" class="new-chat" type="button">新しい調査</button>
-    <input id="search" class="search" type="search" placeholder="過去の調査を探す" title="タイトルと中身（質問・回答・調査の記録）から探します。空白で区切るとAND">
+    <button id="new-chat" class="new-chat" type="button" title="Ctrl+Shift+O">新しい調査</button>
+    <input id="search" class="search" type="search" placeholder="過去の調査を探す（Ctrl+K）" title="タイトルと中身（質問・回答・調査の記録）から探します。空白で区切るとAND">
     <section class="folders">
       <div class="section-head">
         <span>フォルダ</span>
@@ -38,6 +38,7 @@
         <span>フォルダ</span>
         <select id="move-folder"></select>
       </label>
+      <button id="export" class="quiet" type="button" title="質問と回答をMarkdownのファイルに保存する（報告やメモに貼るとき）" hidden>書き出す</button>
       <button id="archive" class="quiet" type="button" hidden>アーカイブ</button>
       <span id="model" class="model" title="設定中のモデル">…</span>
       <button id="open-memo" class="quiet" type="button">メモ</button>
