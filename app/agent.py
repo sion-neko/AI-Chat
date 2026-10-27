@@ -215,6 +215,16 @@ def run_director(
     return {"content": answer.text, "model": model, "followups": followups}
 
 
+def check_llm() -> dict:
+    """LLMに短い質問を1回送って、つながるか確かめる。結果は sources.check と同じ形。"""
+    try:
+        answer = _llm.invoke([HumanMessage("接続の確認です。「OK」とだけ返してください。")])
+    except Exception as e:
+        return {"state": "error", "message": f"{type(e).__name__}: {e}"}
+    model = answer.response_metadata.get("model_name") or os.environ["LLM_MODEL"]
+    return {"state": "ok", "message": f"{model} が応答しました"}
+
+
 def run_turn(history: list[dict], question: str, sources: list[Source], emit: Emit) -> dict:
     """1ターン分の調査と回答。返り値は保存・表示用の assistant ターン。"""
     questions = [t["content"] for t in history if t["role"] == "user"] + [question]

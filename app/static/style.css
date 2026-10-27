@@ -104,7 +104,7 @@ nav { overflow-y: auto; }
 
   .icon-button { display: inline-block; }
 
-  .model-badge { display: none; }
+  .model-badge, .title { display: none; }
 }
 
 header {
@@ -397,3 +397,24 @@ button.stop { color: var(--error); border-color: var(--error); }
   font-size: 12px;
   color: var(--muted);
 }
+
+.status-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 12px; }
+
+.status-table th, .status-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.status-table th { white-space: nowrap; }
+
+.status-message { color: var(--muted); overflow-wrap: anywhere; }
+
+.state { white-space: nowrap; font-weight: bold; }
+
+.state.ok { color: #15803d; }
+
+.state.error { color: var(--error); }
+
+.state.unset { color: var(--muted); font-weight: normal; }

@@ -2,6 +2,7 @@ import os
 import unittest
 from unittest import mock
 
+from app import sources
 from app.sources import github
 from app.sources.http import ApiError
 from tests.fake_api import FakeApi
@@ -62,6 +63,16 @@ class GitHubTest(unittest.TestCase):
         self.serve({"/search/issues": (422, {"message": "Validation Failed"})})
         with self.assertRaisesRegex(ApiError, "HTTP 422.*Validation Failed"):
             github.search_github.invoke({"query": "x"})
+
+    def test_check(self):
+        self.serve({"/user": {"login": "sion"}})
+        self.assertEqual(sources.check(github.GITHUB), {"state": "ok", "message": "sion としてつながりました"})
+
+    def test_check_error(self):
+        self.serve({"/user": (401, {"message": "Bad credentials"})})
+        result = sources.check(github.GITHUB)
+        self.assertEqual(result["state"], "error")
+        self.assertIn("Bad credentials", result["message"])
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ API:
   GET    /api/characters                  所長と所員（使えるソースの分）
   PUT    /api/characters/{key}            {name, persona} キャラクターを編集する。key は "director" かソースID
   DELETE /api/characters/{key}            キャラクターを既定に戻す
+  GET    /api/status                      LLMの設定と、すべてのソース（未設定のものも）
+  POST   /api/check                       LLMと設定済みのソースに実際につないでみる
 
 sources は検索に使うソースIDの配列。
 
@@ -35,6 +37,7 @@ import re
 import threading
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -64,6 +67,21 @@ def character_list() -> list[dict]:
         member = characters.member(s["id"], s["label"])
         result.append({"key": s["id"], "role": f"{s['label']}の担当", "name": member.name, "persona": member.persona})
     return result
+
+
+def status() -> dict:
+    return {
+        "llm": {"base_url": os.environ["LLM_BASE_URL"], "model": os.environ["LLM_MODEL"]},
+        "sources": sources.status(),
+    }
+
+
+def check() -> dict:
+    """LLMとソースの接続確認を並列に行う。"""
+    with ThreadPoolExecutor() as pool:
+        llm = pool.submit(agent.check_llm)
+        results = dict(zip((s.id for s in sources.ALL_SOURCES), pool.map(sources.check, sources.ALL_SOURCES)))
+        return {"llm": llm.result(), "sources": results}
 
 
 def _character_key(key: str) -> bool:
@@ -112,6 +130,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, db.list_conversations())
         if self.path == "/api/characters":
             return self._send_json(200, character_list())
+        if self.path == "/api/status":
+            return self._send_json(200, status())
         if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
             turns = db.load_turns(m[1])
             if turns is None:
@@ -138,6 +158,8 @@ class Handler(BaseHTTPRequestHandler):
             req = self._read_json()
             selected = sources.resolve(req["sources"])
             return self._stream_turn(m[1], history, req["content"], selected, is_new=False)
+        if self.path == "/api/check":
+            return self._send_json(200, check())
         if m := re.fullmatch(r"/api/turns/(\w+)/cancel", self.path):
             if cancel := RUNNING.get(m[1]):
                 cancel.set()

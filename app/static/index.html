@@ -16,9 +16,10 @@
   <div class="chat">
     <header>
       <button id="toggle-sidebar" class="icon-button" type="button" title="会話の一覧">☰</button>
-      <h1><img src="/static/ghost.svg" alt="" class="logo">おばけ探偵事務所</h1>
+      <h1><img src="/static/ghost.svg" alt="" class="logo"><span class="title">おばけ探偵事務所</span></h1>
       <span id="model" class="model-badge" title="設定中のモデル">…</span>
-      <button id="open-characters" class="header-button" type="button">キャラクター</button>
+      <button id="open-status" class="header-button" type="button">接続確認</button>
+      <button id="open-characters" type="button">キャラクター</button>
     </header>
 
     <main id="log"></main>
@@ -40,6 +41,18 @@
     </div>
     <p class="dialog-note">所長と所員の名前と性格（口調や得意なこと）を変えられます。変更は次の質問から反映されます。</p>
     <div id="character-list"></div>
+  </dialog>
+
+  <dialog id="status">
+    <div class="dialog-head">
+      <h2>接続確認</h2>
+      <button id="close-status" type="button" title="閉じる">×</button>
+    </div>
+    <p class="dialog-note">LLMと各ソースに実際につないで、設定が正しいか確かめます。設定は .env に書き、書き換えたらアプリを再起動します。</p>
+    <table id="status-table" class="status-table"></table>
+    <div class="character-actions">
+      <button id="run-check" class="primary" type="button">確認する</button>
+    </div>
   </dialog>
 
   <script src="/static/markdown.js"></script>

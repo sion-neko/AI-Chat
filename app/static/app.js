@@ -55,6 +55,24 @@ document.getElementById("close-characters").addEventListener("click", () => char
 // 名前が変わったらソースの表示（「GitHub（名前）」）も変わる
 characterDialog.addEventListener("close", loadConfig);
 
+const statusDialog = document.getElementById("status");
+document.getElementById("open-status").addEventListener("click", async () => {
+  renderStatus(await api("GET", "/api/status"));
+  statusDialog.showModal();
+});
+document.getElementById("close-status").addEventListener("click", () => statusDialog.close());
+document.getElementById("run-check").addEventListener("click", async (e) => {
+  const button = e.currentTarget;
+  button.disabled = true;
+  button.textContent = "確認中…";
+  try {
+    renderStatus(await api("GET", "/api/status"), await api("POST", "/api/check"));
+  } finally {
+    button.disabled = false;
+    button.textContent = "確認する";
+  }
+});
+
 input.addEventListener("input", autosize);
 input.addEventListener("keydown", (e) => {
   // 日本語変換の確定Enterでは送信しない
@@ -175,6 +193,26 @@ function saveSourceSelection() {
 
 function selectedSources() {
   return [...sourceBox.querySelectorAll("input:checked")].map((box) => box.value);
+}
+
+// 接続確認の表。results（確認の結果）がなければ、設定の有無だけ出す
+function renderStatus(status, results) {
+  const STATE_LABELS = { ok: "OK", error: "エラー", unset: "未設定" };
+  const row = (name, result) => {
+    const tr = el("tr");
+    tr.append(
+      el("th", "", name),
+      el("td", `state ${result.state || ""}`, STATE_LABELS[result.state] || ""),
+      el("td", "status-message", result.message),
+    );
+    return tr;
+  };
+  const rows = [row("LLM", results?.llm ?? { message: `${status.llm.model}（${status.llm.base_url}）` })];
+  for (const s of status.sources) {
+    const unset = { state: "unset", message: `${s.requires} を .env に書くと使えます` };
+    rows.push(row(s.label, results?.sources[s.id] ?? (s.configured ? { message: "設定済み（未確認）" } : unset)));
+  }
+  document.getElementById("status-table").replaceChildren(...rows);
 }
 
 function renderCharacters(list) {
