@@ -161,6 +161,7 @@ async function ask(content, fromTurn, skipClarify = false, images = [], shownIma
   submitting = true;
   setSendButton();
   const asked = currentId;
+  let job = null;
   try {
     const path = asked ? `/api/conversations/${asked}/messages` : "/api/conversations";
     const body = { content, sources: selectedSources(), scopes: selection.scopes };
@@ -170,7 +171,13 @@ async function ask(content, fromTurn, skipClarify = false, images = [], shownIma
     if (images.length) body.images = images;
     if (followup) body.followup = true;
     const { turn_id, conversation_id } = await api("POST", path, body);
-    const job = ensureJob(turn_id, conversation_id, { question: content, index, replace: fromTurn !== null, followup, consult });
+    if (finished.has(turn_id)) {
+      // 受け付けの返事より先に、調査が終わったと届いた（とても速いLLM）。保存された結果を開く
+      if (currentId === asked) await openConversation(conversation_id);
+      else await refreshList();
+      return;
+    }
+    job = ensureJob(turn_id, conversation_id, { question: content, index, replace: fromTurn !== null, followup, consult });
     job.mine = { content, images, shownImages };
     // 受け付けを待つ間に別の会話へ移っていたら、仮の表示は捨てる（戻ってきたときに描き直す）
     if (currentId === asked && turnNode.isConnected) {
@@ -193,6 +200,8 @@ async function ask(content, fromTurn, skipClarify = false, images = [], shownIma
     } else view.node.replaceWith(el("p", "error-text turn-error", `調査を始められませんでした: ${err.message}`));
   } finally {
     submitting = false;
+    // 受け付けを待つ間に別の会話へ移って戻ってきていたら、ここで描く
+    if (job) showJob(job);
     setSendButton();
     input.focus();
   }
@@ -248,9 +257,6 @@ function setSendButton() {
 
 // ---- 進み具合のストリーム ----
 
-// サーバーとつながっているか。切れたらつなぎ直す（サーバーの再起動など）
-let eventsConnected = false;
-
 async function connectEvents() {
   for (let wait = 1000; ; wait = Math.min(wait * 2, 15000)) {
     try {
@@ -258,7 +264,6 @@ async function connectEvents() {
       for (const job of jobs.values()) job.seen = false;
       await readLines("/api/events", (event) => {
         if (event.type === "ready") {
-          eventsConnected = true;
           wait = 1000;
           return lostJobs();
         }
@@ -268,7 +273,6 @@ async function connectEvents() {
     } catch {
       // つながらなかった・切れた。少し待ってつなぎ直す
     }
-    eventsConnected = false;
     await new Promise((resolve) => setTimeout(resolve, wait));
   }
 }
@@ -298,7 +302,11 @@ function onJobEvent(event) {
     return;
   }
   const job = jobs.get(event.turn_id);
-  if (!job) return;
+  if (!job) {
+    // 受け付けの返事より先に終わりが届いた
+    if (["done", "cancelled", "error"].includes(event.type)) finished.add(event.turn_id);
+    return;
+  }
   if (event.type === "done" || event.type === "cancelled" || event.type === "error") return finishJob(job, event);
   job.events.push(event);
   job.view?.update(event);
@@ -328,8 +336,12 @@ function lostJobs() {
   toast("つなぎ直しました", "アプリが止まっていた間の調査は、終わっていなければ中断されています。", null);
 }
 
+// 終わった調査の turn_id（受け付けの返事より先に終わりが届いたときのため）
+const finished = new Set();
+
 function finishJob(job, event) {
   jobs.delete(job.turnId);
+  finished.add(job.turnId);
   // 読んだ印を付け終えてから一覧を読み直す（先に読むと、届いたばかりの未読の印が残る）
   let read = null;
   const shown = job.conversationId === currentId && job.turnNode?.isConnected;
