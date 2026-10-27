@@ -2,7 +2,9 @@
 
 API:
   GET    /api/config
-  GET    /api/conversations               会話一覧
+  GET    /api/conversations?q=&archived=1 会話一覧。q は空白区切りのAND（tag:名前 でタグ、それ以外はタイトルと中身）
+  PATCH  /api/conversations/{id}          {title?, archived?, tags?} 名前・アーカイブ・タグを変える
+  GET    /api/tags                        使われているタグの一覧
   POST   /api/conversations               {content, sources} 新しい会話を作って最初の質問をする
   GET    /api/conversations/{id}          会話の中身（ターン単位）
   GET    /api/traces/{trace_id}           1ターン分のLLMとのやりとり
@@ -38,6 +40,7 @@ import queue
 import re
 import threading
 import traceback
+import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,6 +51,34 @@ from app import agent, characters, db, sources
 STATIC_DIR = Path(__file__).parent / "static"
 CONTENT_TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
 TITLE_LENGTH = 40
+TAG_LENGTH = 20
+TAG_COUNT = 10
+
+
+class InputError(Exception):
+    """リクエストの中身が不正。メッセージはそのまま画面に出る。"""
+
+
+def conversation_changes(req: dict) -> dict:
+    """会話の名前・アーカイブ・タグの変更を確かめて、db.update_conversation に渡せる形にする。"""
+    changes = {}
+    if "title" in req:
+        title = str(req["title"]).strip()
+        if not title:
+            raise InputError("名前を入れてください")
+        changes["title"] = title[:TITLE_LENGTH * 2]
+    if "archived" in req:
+        changes["archived"] = bool(req["archived"])
+    if "tags" in req:
+        if not isinstance(req["tags"], list):
+            raise InputError("タグは配列で送ってください")
+        tags = list(dict.fromkeys(str(t).strip().removeprefix("tag:") for t in req["tags"] if str(t).strip()))
+        if any(len(t) > TAG_LENGTH or " " in t for t in tags):
+            raise InputError(f"タグは空白なしの{TAG_LENGTH}文字以内にしてください")
+        if len(tags) > TAG_COUNT:
+            raise InputError(f"タグは{TAG_COUNT}個までにしてください")
+        changes["tags"] = tags
+    return changes
 
 # 調査中のターン。turn_id → 中止の合図
 RUNNING: dict[str, threading.Event] = {}
@@ -107,7 +138,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self, fn):
         try:
             fn()
-        except (sources.SourceError, characters.CharacterError) as e:
+        except (sources.SourceError, characters.CharacterError, InputError) as e:
             self._send_json(400, {"error": str(e)})
         except Exception as e:
             traceback.print_exc()
@@ -122,14 +153,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         self._handle(self._put)
 
+    def do_PATCH(self):
+        self._handle(self._patch)
+
     def do_DELETE(self):
         self._handle(self._delete)
 
     def _get(self):
+        url = urllib.parse.urlsplit(self.path)
+        query = dict(urllib.parse.parse_qsl(url.query))
         if self.path == "/api/config":
             return self._send_json(200, config())
-        if self.path == "/api/conversations":
-            return self._send_json(200, db.list_conversations())
+        if url.path == "/api/conversations":
+            return self._send_json(200, db.list_conversations(query.get("q", ""), query.get("archived") == "1"))
+        if self.path == "/api/tags":
+            return self._send_json(200, db.all_tags())
         if self.path == "/api/characters":
             return self._send_json(200, character_list())
         if m := re.fullmatch(r"/api/sources/(\w+)/scopes", self.path):
@@ -174,6 +212,13 @@ class Handler(BaseHTTPRequestHandler):
         if m := re.fullmatch(r"/api/turns/(\w+)/cancel", self.path):
             if cancel := RUNNING.get(m[1]):
                 cancel.set()
+            return self._send_json(200, {})
+        self.send_error(404)
+
+    def _patch(self):
+        if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
+            if not db.update_conversation(m[1], **conversation_changes(self._read_json())):
+                return self._send_json(404, {"error": "not found"})
             return self._send_json(200, {})
         self.send_error(404)
 

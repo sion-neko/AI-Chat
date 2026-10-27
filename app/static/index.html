@@ -16,13 +16,18 @@
       </div>
     </div>
     <button id="new-chat" class="new-chat" type="button">新しい調査</button>
-    <input id="search" class="search" type="search" placeholder="過去の調査を探す">
+    <input id="search" class="search" type="search" placeholder="過去の調査を探す" title="タイトルと中身（質問・回答・調査の記録）から探します。空白で区切るとAND、tag:名前 でタグ">
     <nav id="conversations" class="conversations"></nav>
+    <button id="toggle-archive" class="quiet archive-toggle" type="button">アーカイブを見る</button>
   </aside>
 
   <div class="main">
     <header class="topbar">
-      <h1 id="conversation-title" class="conversation-title">新しい調査</h1>
+      <div class="conversation-head">
+        <h1 id="conversation-title" class="conversation-title">新しい調査</h1>
+        <div id="conversation-tags" class="tags"></div>
+      </div>
+      <button id="archive" class="quiet" type="button" hidden>アーカイブ</button>
       <span id="model" class="model" title="設定中のモデル">…</span>
       <button id="open-status" class="quiet" type="button">接続確認</button>
       <button id="open-characters" class="quiet" type="button">キャラクター</button>

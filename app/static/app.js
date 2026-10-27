@@ -1,7 +1,11 @@
 // 表示中の会話ID。null は「新しい会話」（最初の送信でサーバー側に作られる）
 let currentId = null;
-// 会話の一覧（検索で絞り込むために持っておく）
+// 会話の一覧（今の検索とアーカイブの表示に合うもの）
 let conversations = [];
+// アーカイブした会話を見ているか
+let showingArchive = false;
+// 開いている会話。検索で一覧から外れても、名前やタグを出せるように持っておく
+let openedConversation = null;
 // 所長の名前（回答の見出しに使う）と、ソースIDから画面の名前への対応
 let directorName = "所長";
 let sourceLabels = new Map();
@@ -10,6 +14,8 @@ const log = document.getElementById("log");
 const list = document.getElementById("conversations");
 const search = document.getElementById("search");
 const titleEl = document.getElementById("conversation-title");
+const tagsEl = document.getElementById("conversation-tags");
+const archiveButton = document.getElementById("archive");
 const form = document.getElementById("form");
 const input = document.getElementById("input");
 const send = document.getElementById("send");
@@ -42,7 +48,26 @@ document.getElementById("new-chat").addEventListener("click", () => {
   input.focus();
 });
 
-search.addEventListener("input", renderList);
+// 打つたびにサーバーで探す（中身まで探すので、打ち終わるのを少し待つ）
+let searchTimer = null;
+search.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(refreshList, 250);
+});
+document.getElementById("toggle-archive").addEventListener("click", (e) => {
+  showingArchive = !showingArchive;
+  e.currentTarget.textContent = showingArchive ? "通常の一覧に戻る" : "アーカイブを見る";
+  document.querySelector(".sidebar").classList.toggle("archive-mode", showingArchive);
+  refreshList();
+});
+archiveButton.addEventListener("click", async () => {
+  const c = currentConversation();
+  await api("PATCH", `/api/conversations/${c.id}`, { archived: !c.archived });
+  c.archived = !c.archived;
+  renderHead();
+  await refreshList();
+});
+titleEl.addEventListener("click", renameConversation);
 sourceBox.addEventListener("change", saveSourceSelection);
 
 document.getElementById("open-characters").addEventListener("click", async () => {
@@ -92,7 +117,7 @@ form.addEventListener("submit", async (e) => {
 
   if (document.getElementById("empty")) {
     log.replaceChildren();
-    titleEl.textContent = content;
+    renderHead({ title: content, tags: [] });
   }
   const turn = append(turnView(content));
   input.value = "";
@@ -123,6 +148,7 @@ form.addEventListener("submit", async (e) => {
     if (!currentId) {
       currentId = result.conversation_id;
       await refreshList();
+      renderHead();
     }
   } catch (err) {
     progress.node.replaceWith(el("p", "error-text", `調査できませんでした: ${err.message}`));
@@ -347,10 +373,15 @@ function labeled(text, control) {
 
 // ---- 会話の一覧 ----
 
+function currentConversation() {
+  return conversations.find((c) => c.id === currentId) ?? openedConversation;
+}
+
 async function openConversation(id) {
   const data = await api("GET", `/api/conversations/${id}`);
   currentId = id;
-  titleEl.textContent = conversations.find((c) => c.id === id)?.title ?? "";
+  openedConversation = conversations.find((c) => c.id === id) ?? null;
+  renderHead();
   const nodes = [];
   for (const t of data.turns) {
     if (t.role === "user") nodes.push(turnView(t.content));
@@ -372,22 +403,26 @@ async function deleteConversation(id) {
 }
 
 async function refreshList() {
-  conversations = await api("GET", "/api/conversations");
+  const params = new URLSearchParams({ q: search.value.trim() });
+  if (showingArchive) params.set("archived", "1");
+  conversations = await api("GET", `/api/conversations?${params}`);
+  if (currentId) openedConversation = conversations.find((c) => c.id === currentId) ?? openedConversation;
   renderList();
 }
 
-// 更新日ごとにまとめて出す。検索語があればタイトルで絞る
+// 更新日ごとにまとめて出す
 function renderList() {
-  const query = search.value.trim().toLowerCase();
-  const shown = conversations.filter((c) => !query || c.title.toLowerCase().includes(query));
   const nodes = [];
   let group = null;
-  for (const c of shown) {
+  for (const c of conversations) {
     const g = dateGroup(c.updated_at);
     if (g !== group) nodes.push(el("div", "conv-group", (group = g)));
     nodes.push(conversationItem(c));
   }
-  if (!shown.length) nodes.push(el("div", "conv-empty", query ? "見つかりませんでした" : "まだ調査はありません"));
+  if (!conversations.length) {
+    const text = search.value.trim() ? "見つかりませんでした" : showingArchive ? "アーカイブした調査はありません" : "まだ調査はありません";
+    nodes.push(el("div", "conv-empty", text));
+  }
   list.replaceChildren(...nodes);
   highlightCurrent();
 }
@@ -405,9 +440,11 @@ function dateGroup(iso) {
 function conversationItem(c) {
   const item = el("div", "conv");
   item.dataset.id = c.id;
-  const title = el("button", "conv-title", c.title);
+  const title = el("button", "conv-title");
   title.type = "button";
   title.title = c.title;
+  title.append(el("span", "conv-name", c.title));
+  for (const tag of c.tags) title.append(el("span", "conv-tag", tag));
   title.addEventListener("click", () => openConversation(c.id));
   const del = el("button", "conv-delete", "×");
   del.type = "button";
@@ -415,6 +452,104 @@ function conversationItem(c) {
   del.addEventListener("click", () => deleteConversation(c.id));
   item.append(title, del);
   return item;
+}
+
+// ---- 開いている会話の見出し（名前・タグ・アーカイブ） ----
+
+// 新しい会話を送った直後は、まだ一覧にないので draft（仮の名前）を出す
+function renderHead(draft) {
+  const c = draft ? null : currentConversation();
+  titleEl.textContent = c?.title ?? draft?.title ?? "新しい調査";
+  titleEl.classList.toggle("editable", Boolean(c));
+  titleEl.title = c ? "クリックして名前を変える" : "";
+  archiveButton.hidden = !c;
+  archiveButton.textContent = c?.archived ? "アーカイブから戻す" : "アーカイブ";
+  tagsEl.replaceChildren();
+  if (!c) return;
+  for (const tag of c.tags) {
+    const chip = el("span", "tag", tag);
+    const remove = el("button", "tag-remove", "×");
+    remove.type = "button";
+    remove.title = `タグ「${tag}」を外す`;
+    remove.addEventListener("click", () => saveTags(c.tags.filter((t) => t !== tag)));
+    chip.title = `「${tag}」の調査を探す`;
+    chip.addEventListener("click", (e) => {
+      if (e.target === remove) return;
+      search.value = `tag:${tag}`;
+      refreshList();
+    });
+    chip.append(remove);
+    tagsEl.append(chip);
+  }
+  const add = el("button", "tag-add", "＋ タグ");
+  add.type = "button";
+  add.addEventListener("click", () => addTagInput(add, c));
+  tagsEl.append(add);
+}
+
+function addTagInput(button, c) {
+  const field = el("input", "tag-input");
+  field.placeholder = "タグ名";
+  field.maxLength = 20;
+  field.setAttribute("list", "tag-suggestions");
+  // 使ったことのあるタグを候補に出す
+  api("GET", "/api/tags").then((tags) => {
+    const datalist = document.getElementById("tag-suggestions") ?? document.body.appendChild(el("datalist"));
+    datalist.id = "tag-suggestions";
+    datalist.replaceChildren(...tags.filter((t) => !c.tags.includes(t)).map((t) => Object.assign(el("option"), { value: t })));
+  });
+  const done = async (save) => {
+    const tag = field.value.trim();
+    if (save && tag) await saveTags([...c.tags, tag]);
+    else renderHead();
+  };
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) done(true);
+    if (e.key === "Escape") done(false);
+  });
+  field.addEventListener("blur", () => done(Boolean(field.value.trim())));
+  button.replaceWith(field);
+  field.focus();
+}
+
+async function saveTags(tags) {
+  const c = currentConversation();
+  try {
+    await api("PATCH", `/api/conversations/${c.id}`, { tags });
+    c.tags = [...new Set(tags.map((t) => t.trim()).filter(Boolean))];
+  } catch (err) {
+    alert(err.message);
+  }
+  renderHead();
+  renderList();
+}
+
+function renameConversation() {
+  const c = currentConversation();
+  if (!c || titleEl.querySelector("input")) return;
+  const field = el("input", "title-input");
+  field.value = c.title;
+  field.maxLength = 80;
+  const done = async (save) => {
+    const title = field.value.trim();
+    if (save && title && title !== c.title) {
+      await api("PATCH", `/api/conversations/${c.id}`, { title });
+      c.title = title;
+      renderList();
+    }
+    renderHead();
+  };
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) field.blur();
+    if (e.key === "Escape") {
+      field.value = c.title;
+      field.blur();
+    }
+  });
+  field.addEventListener("blur", () => done(true));
+  titleEl.replaceChildren(field);
+  field.focus();
+  field.select();
 }
 
 function highlightCurrent() {
@@ -738,7 +873,8 @@ function scrollToBottom() {
 }
 
 function showEmpty() {
-  titleEl.textContent = "新しい調査";
+  openedConversation = null;
+  renderHead();
   const node = el("div", "empty");
   node.id = "empty";
   const logo = el("img", "empty-logo");
