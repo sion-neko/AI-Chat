@@ -366,19 +366,38 @@ function answerFrame(agent) {
   return { node, body, meta };
 }
 
-function answerView({ agent, content, model, reports }) {
+function answerView({ agent, content, model, reports, links }) {
   const { node, body, meta } = answerFrame(agent);
   const searches = reports.reduce((n, r) => n + r.steps.length, 0);
   const members = new Set(reports.map((r) => r.source)).size;
   const followups = reports.filter((r) => r.request).length;
   meta.textContent = [model, `所員${members}人`, `検索${searches}回`, followups && `再調査${followups}件`].filter(Boolean).join(" · ");
 
+  const answer = markdownView(content);
   const actions = el("div", "answer-actions");
   actions.append(copyButton(content));
+  // 照合の結果がない（照合を入れる前の）回答には何も出さない
+  if (links) actions.append(markLinks(answer, links));
   const record = el("details", "record");
   record.append(el("summary", "", "調査の記録を見る"), membersView(reports.map(memberView)));
-  body.append(markdownView(content), actions, record);
+  body.append(answer, actions, record);
   return node;
+}
+
+// 検索結果になかったリンクに印を付け、根拠の件数を返す
+function markLinks(answer, links) {
+  const key = (url) => url.replace(/[.,;:!?]+$/, "").replace(/\/+$/, "");
+  const missing = new Set(links.filter((l) => !l.found).map((l) => key(l.url)));
+  for (const a of answer.querySelectorAll("a")) {
+    if (!missing.has(key(a.getAttribute("href")))) continue;
+    a.classList.add("unverified");
+    a.title = "所員の検索結果にないリンクです。LLMが作ったURLかもしれません";
+  }
+  if (!links.length) return el("span", "pill unset", "根拠のリンクなし");
+  if (!missing.size) return el("span", "pill done", `根拠のリンク${links.length}件はすべて検索結果にあります`);
+  const pill = el("span", "pill failed", `根拠のリンク${links.length}件のうち${missing.size}件は検索結果にありません`);
+  pill.title = "印の付いたリンクは、所員の検索結果に出てこなかったURLです";
+  return pill;
 }
 
 // 調査中の表示。所員ごとの状態と、届いた分の回答を出す

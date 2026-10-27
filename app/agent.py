@@ -22,7 +22,7 @@ from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.prebuilt.tool_node import ToolInvocationError
 
-from app import characters
+from app import characters, links
 from app.sources import Source
 from app.sources.http import ApiError
 
@@ -56,7 +56,7 @@ DIRECTOR_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name
 
 - 報告に書かれた事実だけで答える。推測で補わない
 - 複数の報告を突き合わせ、経緯を時系列でまとめる
-- 回答には根拠のURLを必ず付ける
+- 回答には根拠のURLを必ず付ける。URLは所員の報告に書かれたものを一字一句そのまま使い、自分で作らない
 - どの所員も見つけられなかった場合は、そう伝える
 - 報告では答えきれないとき（結末が分からない、報告どうしが食い違う、検索語や期間の見落としがありそう等）は、
   request_reinvestigation で所員に再調査を頼める。頼むのは本当に必要なときだけにし、何をどう調べ直すかを具体的に書く"""
@@ -234,5 +234,11 @@ def run_turn(history: list[dict], question: str, sources: list[Source], emit: Em
     director = characters.director()
     emit({"type": "director_start", "agent": director.name})
     answer = run_director(director, history, questions, reports, sources, emit)
-    followups = answer.pop("followups")
-    return {"role": "assistant", "agent": director.name, **answer, "reports": reports + followups}
+    reports += answer.pop("followups")
+    return {
+        "role": "assistant",
+        "agent": director.name,
+        **answer,
+        "reports": reports,
+        "links": links.verify(answer["content"], reports),
+    }

@@ -526,3 +526,9 @@ dialog::backdrop { background: rgb(20 24 30 / 0.45); }
 .status-table .pill { display: inline-block; }
 
 .pill.unset { color: var(--muted); background: var(--shelf); font-weight: normal; }
+
+.answer-actions { align-items: center; }
+
+.markdown a.unverified { color: var(--error); text-decoration-style: dashed; }
+
+.markdown a.unverified::after { content: " ⚠"; font-size: 0.85em; }

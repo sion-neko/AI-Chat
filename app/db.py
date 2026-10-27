@@ -4,6 +4,7 @@
   user:      {"role": "user", "content": ...}
   assistant: {"role": "assistant", "agent", "content", "model", "reports": [所員の報告（検索の過程も含む）]}
              再調査の報告は request（所長からの依頼）を持ち、最初の報告の後ろに並ぶ
+             links: [{"url", "found"}] 回答のリンクが検索結果にあったか（app/links.py）
 """
 
 import json
