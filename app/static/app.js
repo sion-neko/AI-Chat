@@ -390,7 +390,6 @@ function toast(heading, body, conversationId) {
   node.append(text);
   if (conversationId) {
     const open = el("button", "primary", "開く");
-    open.type = "button";
     open.addEventListener("click", () => {
       node.remove();
       openConversation(conversationId);
@@ -398,7 +397,6 @@ function toast(heading, body, conversationId) {
     node.append(open);
   }
   const close = el("button", "close", "×");
-  close.type = "button";
   close.title = "閉じる";
   close.addEventListener("click", () => node.remove());
   node.append(close);
@@ -526,7 +524,6 @@ function renderAttachments() {
       const item = el("div", "attachment");
       const img = Object.assign(el("img"), { src: url, alt: `添えた画像${i + 1}` });
       const remove = el("button", "attachment-remove", "×");
-      remove.type = "button";
       remove.title = "外す";
       remove.addEventListener("click", () => {
         attachments.splice(i, 1);
@@ -693,7 +690,6 @@ function renderSources(sources) {
 // 範囲を選べるソースのチップの横に出すボタン。今の選択を短く出す
 function scopeButton(source) {
   const button = el("button", "scope-button");
-  button.type = "button";
   const names = selection.scopes[source.id] ?? [];
   button.textContent = names.length ? (names.length === 1 ? names[0] : `${names[0]} ほか${names.length - 1}件`) : `すべての${source.scope_label}`;
   button.title = `${source.label}で調べる${source.scope_label}を選ぶ`;
@@ -927,7 +923,6 @@ function conversationItem(c) {
   const item = el("div", "conv");
   item.dataset.id = c.id;
   const title = el("button", "conv-title");
-  title.type = "button";
   title.title = c.title;
   title.append(el("span", "conv-name", c.title));
   // 調査中なら動く印、まだ見ていない回答があれば点を出す
@@ -940,7 +935,6 @@ function conversationItem(c) {
   }
   title.addEventListener("click", () => openConversation(c.id));
   const del = el("button", "conv-delete", "×");
-  del.type = "button";
   del.title = "削除";
   del.addEventListener("click", () => deleteConversation(c.id));
   item.append(title, del);
@@ -975,14 +969,12 @@ function renderFolders() {
     const row = el("div", "folder-item");
     row.classList.toggle("active", id === viewFolderId);
     const open = el("button", "folder-open");
-    open.type = "button";
     open.append(icon(id ? "folder" : "inbox"), el("span", "folder-name", name));
     if (count !== undefined) open.append(el("span", "folder-count", String(count)));
     open.addEventListener("click", () => startNew(id));
     row.append(open);
     if (id) {
       const settings = el("button", "folder-settings");
-      settings.type = "button";
       settings.append(icon("more"));
       settings.title = `「${name}」の名前・削除`;
       settings.setAttribute("aria-label", settings.title);
@@ -1076,7 +1068,6 @@ function renderHead(draft) {
     // フォルダへ移すメニュー。今のフォルダには印を付ける
     const item = (id, name, iconName) => {
       const button = el("button", (c.folder_id ?? null) === id ? "current" : "");
-      button.type = "button";
       button.setAttribute("role", "menuitemradio");
       button.setAttribute("aria-checked", String((c.folder_id ?? null) === id));
       button.append(icon((c.folder_id ?? null) === id ? "check" : iconName), name);
@@ -1228,14 +1219,12 @@ function turnView(question, index, { images = [], imageText = "", followup = fal
   if (question.length > 600 || question.split("\n").length > 12) {
     bubble.classList.add("clamped");
     more = el("button", "question-more quiet", "全文を見る");
-    more.type = "button";
     more.addEventListener("click", () => {
       const open = bubble.classList.toggle("clamped");
       more.textContent = open ? "全文を見る" : "たたむ";
     });
   }
   const edit = el("button", "question-edit", "編集");
-  edit.type = "button";
   edit.title = "質問を直して調べ直す";
   edit.addEventListener("click", () => editQuestion(node, question, index));
   const row = el("div", "question-row");
@@ -1329,9 +1318,7 @@ function editQuestion(node, question, index) {
   field.value = question;
   field.rows = Math.min(8, question.split("\n").length + 1);
   const cancel = el("button", "quiet", "やめる");
-  cancel.type = "button";
   const submit = el("button", "primary", "調べ直す");
-  submit.type = "button";
   const actions = el("div", "dialog-actions");
   actions.append(cancel, submit);
   editor.append(field, actions);
@@ -1374,7 +1361,6 @@ function clarifyView({ agent, content }, index) {
   meta.replaceChildren(el("span", "pill followup", "確認"));
   const note = el("div", "clarify-note", "答えを下の入力欄に書いてください。");
   const skip = iconButton("search", "聞き返さずに調べる");
-  skip.type = "button";
   skip.title = "今の質問のまま、所員に調べさせます";
   skip.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index, true));
   const actions = el("div", "answer-actions");
@@ -1384,30 +1370,38 @@ function clarifyView({ agent, content }, index) {
 }
 
 // 調べる場所を選ばずに所長に相談したターン。出典や調査の記録はない
-function chatView({ agent, content, model, seconds, llm_calls, trace_id }, index) {
-  const { node, body, meta } = answerFrame(agent);
-  meta.replaceChildren(el("span", "pill unset", "相談（調べていません）"), " ", [model, seconds !== undefined && formatSeconds(seconds)].filter(Boolean).join(" · "));
-  const actions = el("div", "answer-actions");
-  actions.append(copyButton(content));
-  const regenerate = iconButton("redo", "作り直す");
-  regenerate.type = "button";
-  regenerate.title = "同じ頼みでもう一度答えてもらう（今選んでいる調べる場所で）";
-  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index));
-  actions.append(regenerate);
-  if (trace_id) {
-    const button = iconButton("list", `LLMとのやりとり（${llm_calls}回）`, "subtle");
-    button.type = "button";
-    button.addEventListener("click", () => openTrace(trace_id));
-    actions.append(button);
-  }
-  body.append(markdownView(content), actions);
+function chatView(turn, index) {
+  const { node, body, meta } = answerFrame(turn.agent);
+  meta.replaceChildren(el("span", "pill unset", "相談（調べていません）"), " ", [turn.model, turn.seconds !== undefined && formatSeconds(turn.seconds)].filter(Boolean).join(" · "));
+  body.append(markdownView(turn.content), answerActions(turn, index, "同じ頼みでもう一度答えてもらう（今選んでいる調べる場所で）"));
   return node;
+}
+
+// 回答の下の操作（コピー・作り直す・その後どうなった？・LLMとのやりとり）。続報は調べた回答にだけ出す
+function answerActions(turn, index, regenerateTitle, followup = false) {
+  const actions = el("div", "answer-actions");
+  const regenerate = iconButton("redo", "作り直す");
+  regenerate.title = regenerateTitle;
+  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index));
+  actions.append(copyButton(turn.content), regenerate);
+  if (followup) {
+    const ask = iconButton("clock", "その後どうなった？", "followup-ask");
+    ask.title = turn.date ? `${turn.date} 以降の動きだけを調べる` : "この回答の日以降の動きだけを調べる";
+    ask.addEventListener("click", askFollowup);
+    actions.append(ask);
+  }
+  if (turn.trace_id) {
+    const trace = iconButton("list", `LLMとのやりとり（${turn.llm_calls}回）`, "subtle");
+    trace.addEventListener("click", () => openTrace(turn.trace_id));
+    actions.append(trace);
+  }
+  return actions;
 }
 
 function answerView(turn, index) {
   if (turn.kind === "clarify") return clarifyView(turn, index);
   if (turn.kind === "chat") return chatView(turn, index);
-  const { agent, content, model, reports, links, seconds, llm_calls, trace_id, memo_added } = turn;
+  const { agent, content, model, reports, links, seconds, memo_added } = turn;
   const { node, body, meta } = answerFrame(agent);
   const searches = reports.reduce((n, r) => n + r.steps.length, 0);
   const members = new Set(reports.map((r) => r.source)).size;
@@ -1423,24 +1417,7 @@ function answerView(turn, index) {
     .join(" · ");
 
   const answer = markdownView(content);
-  const actions = el("div", "answer-actions");
-  actions.append(copyButton(content));
-  const regenerate = iconButton("redo", "作り直す");
-  regenerate.type = "button";
-  regenerate.title = "同じ質問でもう一度調べる";
-  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index));
-  actions.append(regenerate);
-  const followup = iconButton("clock", "その後どうなった？", "followup-ask");
-  followup.type = "button";
-  followup.title = turn.date ? `${turn.date} 以降の動きだけを調べる` : "この回答の日以降の動きだけを調べる";
-  followup.addEventListener("click", askFollowup);
-  actions.append(followup);
-  if (trace_id) {
-    const button = iconButton("list", `LLMとのやりとり（${llm_calls}回）`, "subtle");
-    button.type = "button";
-    button.addEventListener("click", () => openTrace(trace_id));
-    actions.append(button);
-  }
+  const actions = answerActions(turn, index, "同じ質問でもう一度調べる", true);
   const record = el("details", "record");
   record.append(el("summary", "", "調査の記録を見る"), membersView(reports.map(memberView)));
   body.append(answer);
@@ -1456,7 +1433,6 @@ function memoAddedView(added) {
   const box = el("div", "memo-added");
   const head = el("div", "memo-added-head", "メモに書き足しました");
   const open = el("button", "quiet", "メモを開く");
-  open.type = "button";
   open.addEventListener("click", openMemo);
   head.append(open);
   const list = el("ul");
@@ -1718,7 +1694,6 @@ function showEmpty() {
   const examples = el("div", "examples");
   for (const text of EXAMPLES) {
     const example = el("button", "example", text);
-    example.type = "button";
     example.addEventListener("click", () => {
       input.value = text;
       autosize();
@@ -1857,10 +1832,8 @@ function renderMcp({ path, servers }) {
         el("span", "mcp-where", s.url ?? [s.command, ...(s.args ?? [])].join(" ")),
       );
       const edit = el("button", "quiet", "編集");
-      edit.type = "button";
       edit.addEventListener("click", () => openMcpForm(s));
       const remove = el("button", "quiet danger", "外す");
-      remove.type = "button";
       remove.addEventListener("click", async () => {
         if (!confirm(`MCPサーバー「${s.label}」を外しますか？`)) return;
         renderMcp(await api("DELETE", `/api/mcp/${s.key}`));
@@ -1992,8 +1965,8 @@ function characterForm(c) {
   persona.rows = 2;
   const status = el("span", "character-status");
   const reset = el("button", "quiet", "既定に戻す");
-  reset.type = "button";
   const save = el("button", "primary", "保存");
+  save.type = "submit";
 
   const run = async (request) => {
     try {
@@ -2106,14 +2079,12 @@ function setLabel(button, text) {
 // アイコンつきのボタン
 function iconButton(name, text, className = "") {
   const button = el("button", className);
-  button.type = "button";
   button.append(icon(name), text);
   return button;
 }
 
 function copyButton(text) {
   const button = iconButton("copy", "コピー");
-  button.type = "button";
   button.title = "回答をMarkdownのままコピー";
   button.addEventListener("click", async () => {
     try {
@@ -2154,8 +2125,10 @@ async function api(method, path, body) {
   return data;
 }
 
+// 要素を作る。ボタンは既定で type="button"（フォームの中でも送信しない。送信させるボタンだけ type を変える）
 function el(tag, className, text) {
   const node = document.createElement(tag);
+  if (tag === "button") node.type = "button";
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
