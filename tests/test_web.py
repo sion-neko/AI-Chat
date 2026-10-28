@@ -3,6 +3,7 @@
 LLMは決まった応答を返す偽物（tests/test_agent.py の FakeLLM）に差し替える。外にはつながない。
 """
 
+import base64
 import json
 import os
 import queue
@@ -17,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 with mock.patch.dict(os.environ, {"LLM_BASE_URL": "http://unused.invalid/v1", "LLM_API_KEY": "x", "LLM_MODEL": "fake"}):
-    from app import agent, db, sources, web
+    from app import agent, db, models, sources, web
     from app.sources import dummy, mcp_servers
 
 from tests.test_agent import FakeLLM
@@ -47,6 +48,9 @@ class WebTest(unittest.TestCase):
             # 手元の .env や MCPサーバーの設定によらず、サンプルのソースだけで動かす
             mock.patch.object(sources, "BUILTIN", [dummy.CHAT, dummy.WIKI]),
             mock.patch.object(mcp_servers, "_loaded", {}),
+            mock.patch.object(mcp_servers, "CONFIG_PATH", str(Path(tmp.name) / "mcp.json")),
+            # アクセスのログでテストの出力を埋めない
+            mock.patch.object(web.Handler, "log_message"),
         ):
             patch.start()
             self.addCleanup(patch.stop)
@@ -170,6 +174,44 @@ class WebTest(unittest.TestCase):
         self.assertTrue(cancelled["deleted"])
         self.assertEqual(self.call("GET", f"/api/conversations/{started['conversation_id']}")[0], 404)
 
+    def test_question_images_are_saved_and_served(self):
+        png = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+        body = {"content": "これ何？", "sources": [], "images": [png]}
+        # 画像を読めないモデルでは断る
+        self.assertIn("画像を読めません", self.call("POST", "/api/conversations", body)[1]["error"])
+        q = self.events()
+        with mock.patch.object(models, "vision", return_value=True):
+            for bad, message in (([png] * 5, "4枚まで"), (["data:image/svg+xml;base64,AAAA"], "PNG・JPEG")):
+                self.assertIn(message, self.call("POST", "/api/conversations", {**body, "images": bad})[1]["error"])
+            self.assertEqual(self.call("POST", "/api/conversations", body)[0], 200)
+            done = self.wait_for(q, "done")
+        [image_id] = done["question"]["images"]
+        with urllib.request.urlopen(f"{self.base}/api/images/{image_id}", timeout=10) as res:
+            self.assertEqual((res.headers["Content-Type"], res.read()), ("image/png", b"\x89PNG\r\n\x1a\n"))
+            # 画像は変わらないので、画面に覚えさせる
+            self.assertIn("max-age", res.headers["Cache-Control"])
+        self.assertEqual(self.call("GET", "/api/images/nope")[0], 404)
+
+    def test_deleting_conversation_stops_its_investigation(self):
+        gate = Gate()
+        q = self.events()
+        with mock.patch.object(agent, "_llm", gate):
+            _, first = self.call("POST", "/api/conversations", {"content": "要約して", "sources": []})
+            gate.opened.set()
+            self.wait_for(q, "done")
+            gate.opened.clear()
+            conv_id = first["conversation_id"]
+            self.call("POST", f"/api/conversations/{conv_id}/messages", {"content": "続き", "sources": []})
+            self.assertEqual(self.call("DELETE", f"/api/conversations/{conv_id}"), (200, {}))
+            gate.opened.set()
+            # 保存先がないので、続きの回答は保存しない（会話を作り直さない）
+            self.wait_for(q, "cancelled")
+        self.assertEqual(self.call("GET", f"/api/conversations/{conv_id}")[0], 404)
+
+    def test_unexpected_errors_are_500(self):
+        with mock.patch.object(db, "list_folders", side_effect=RuntimeError("壊れた")), mock.patch.object(web.traceback, "print_exc"):
+            self.assertEqual(self.call("GET", "/api/folders"), (500, {"error": "RuntimeError: 壊れた"}))
+
     def test_bad_requests(self):
         bad = [
             ("POST", "/api/conversations", {"content": "x", "sources": ["nope"]}),
@@ -223,6 +265,17 @@ class WebTest(unittest.TestCase):
         self.assertEqual(listed[0]["name"], "シロ")
         self.assertEqual(self.call("PUT", "/api/characters/nope", {"name": "x", "persona": ""})[0], 404)
         self.assertEqual(self.call("PUT", "/api/characters/director", {"name": "", "persona": ""})[0], 400)
+
+    def test_mcp_servers(self):
+        self.assertIn("表示名", self.call("POST", "/api/mcp", {"label": " ", "url": "http://x"})[1]["error"])
+        self.assertEqual(self.call("PUT", "/api/mcp/nope", {"label": "x", "url": "http://x"})[0], 404)
+        # つながらないサーバーでも設定は残り、理由が一覧に出る
+        _, listed = self.call("POST", "/api/mcp", {"label": "Wiki", "url": "http://127.0.0.1:9/mcp"})
+        [entry] = listed["servers"]
+        self.assertEqual((entry["key"], entry["connected"]), ("wiki", False))
+        self.assertTrue(entry["error"])
+        _, listed = self.call("DELETE", "/api/mcp/wiki")
+        self.assertEqual(listed["servers"], [])
 
 
 if __name__ == "__main__":
