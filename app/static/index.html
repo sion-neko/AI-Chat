@@ -79,7 +79,7 @@
   <dialog id="memo-dialog" class="wide">
     <div class="dialog-head">
       <h2>メモ</h2>
-      <button id="close-memo" class="close" type="button" title="閉じる">×</button>
+      <button class="close" type="button" title="閉じる" data-close>×</button>
     </div>
     <p class="dialog-note">所長と所員が調べるときに読みます。社内での呼び方、どの話がどこにあるか、回答の好みなどを書いてください。調査のあとに所長が自分で書き足すこともあります。</p>
     <form id="memo-form" class="memo-form">
@@ -101,7 +101,7 @@
   <dialog id="folder-dialog">
     <div class="dialog-head">
       <h2>フォルダの設定</h2>
-      <button id="close-folder" class="close" type="button" title="閉じる">×</button>
+      <button class="close" type="button" title="閉じる" data-close>×</button>
     </div>
     <form id="folder-form" class="folder-form">
       <label class="field"><span>名前</span><input id="folder-name" maxlength="40" required></label>
@@ -116,7 +116,7 @@
   <dialog id="characters">
     <div class="dialog-head">
       <h2>キャラクター</h2>
-      <button id="close-characters" class="close" type="button" title="閉じる">×</button>
+      <button class="close" type="button" title="閉じる" data-close>×</button>
     </div>
     <p class="dialog-note">所長と所員の名前と性格（口調や得意なこと）を変えられます。変更は次の質問から反映されます。</p>
     <div id="character-list" class="character-list"></div>
@@ -125,7 +125,7 @@
   <dialog id="status" class="wide">
     <div class="dialog-head">
       <h2>ソースと接続</h2>
-      <button id="close-status" class="close" type="button" title="閉じる">×</button>
+      <button class="close" type="button" title="閉じる" data-close>×</button>
     </div>
 
     <section class="dialog-section">
@@ -177,7 +177,7 @@
   <dialog id="scope">
     <div class="dialog-head">
       <h2 id="scope-title">調べる範囲</h2>
-      <button id="close-scope" class="close" type="button" title="閉じる">×</button>
+      <button class="close" type="button" title="閉じる" data-close>×</button>
     </div>
     <p id="scope-note" class="dialog-note"></p>
     <input id="scope-filter" class="search" type="search" placeholder="名前で絞り込む">
@@ -191,7 +191,7 @@
   <dialog id="trace" class="wide">
     <div class="dialog-head">
       <h2>LLMとのやりとり</h2>
-      <button id="close-trace" class="close" type="button" title="閉じる">×</button>
+      <button class="close" type="button" title="閉じる" data-close>×</button>
     </div>
     <p id="trace-summary" class="dialog-note"></p>
     <div id="trace-list" class="calls"></div>

@@ -752,7 +752,6 @@ function renderScopeList() {
 
 scopeFilter.addEventListener("input", renderScopeList);
 
-document.getElementById("close-scope").addEventListener("click", () => scopeDialog.close());
 
 document.getElementById("scope-clear").addEventListener("click", () => {
   scopeEditing.checked.clear();
@@ -1018,7 +1017,6 @@ function openFolderDialog(id) {
   folderDialog.showModal();
 }
 
-document.getElementById("close-folder").addEventListener("click", () => folderDialog.close());
 
 document.getElementById("folder-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1746,7 +1744,6 @@ async function openMemo() {
 
 document.getElementById("open-memo").addEventListener("click", openMemo);
 
-document.getElementById("close-memo").addEventListener("click", () => memoDialog.close());
 
 globalMemo.addEventListener("input", () => countMemo(globalMemo, document.getElementById("global-memo-count")));
 
@@ -1778,7 +1775,6 @@ document.getElementById("open-status").addEventListener("click", async () => {
   statusDialog.showModal();
 });
 
-document.getElementById("close-status").addEventListener("click", () => statusDialog.close());
 
 document.getElementById("run-check").addEventListener("click", async (e) => {
   const button = e.currentTarget;
@@ -1942,7 +1938,6 @@ document.getElementById("open-characters").addEventListener("click", async () =>
   characterDialog.showModal();
 });
 
-document.getElementById("close-characters").addEventListener("click", () => characterDialog.close());
 
 // 名前が変わったらソースの表示（所員の名前）も変わる
 characterDialog.addEventListener("close", loadConfig);
@@ -1997,7 +1992,6 @@ function labeled(text, control) {
 
 const traceDialog = document.getElementById("trace");
 
-document.getElementById("close-trace").addEventListener("click", () => traceDialog.close());
 
 const ROLE_LABELS = { system: "指示（システム）", human: "依頼", ai: "LLM", tool: "ツールの結果" };
 
@@ -2046,7 +2040,6 @@ const helpDialog = document.getElementById("help");
 
 document.getElementById("open-help").addEventListener("click", () => helpDialog.showModal());
 
-helpDialog.querySelector("[data-close]").addEventListener("click", () => helpDialog.close());
 
 // ---- キーボード ----
 
@@ -2156,6 +2149,11 @@ log.addEventListener("scroll", () => {
 function autosize() {
   input.style.height = "auto";
   input.style.height = `${input.scrollHeight}px`;
+}
+
+// ダイアログの × はどれも、そのダイアログを閉じる
+for (const button of document.querySelectorAll("dialog [data-close]")) {
+  button.addEventListener("click", () => button.closest("dialog").close());
 }
 
 // ---- 起動 ----
