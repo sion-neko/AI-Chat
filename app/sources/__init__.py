@@ -3,7 +3,20 @@
 from app.sources import dummy, github, gitlab, mcp_servers, zulip
 from app.sources.base import Source
 
-__all__ = ["Source", "SourceError", "all_sources", "check", "demo_mode", "describe", "resolve", "resolve_scopes", "scope_choices", "status", "usable"]
+__all__ = [
+    "Source",
+    "SourceError",
+    "all_sources",
+    "check",
+    "demo_mode",
+    "describe",
+    "listed",
+    "resolve",
+    "resolve_scopes",
+    "scope_choices",
+    "status",
+    "usable",
+]
 
 BUILTIN: list[Source] = [dummy.CHAT, dummy.WIKI, github.GITHUB, gitlab.GITLAB, zulip.ZULIP]
 # お試し用のサンプルソース。本物のソースを1つでも設定したら使わない（架空の話が回答に混ざらないように）
@@ -21,10 +34,15 @@ def demo_mode() -> bool:
     return not any(s.configured for s in all_sources() if s.id not in SAMPLES)
 
 
-def usable() -> list[Source]:
-    """今使えるソース。サンプルは、本物のソースが1つもないときだけ。"""
+def listed() -> list[Source]:
+    """接続確認の画面に出すソース（設定していないものも含む）。サンプルは、本物のソースが1つもないときだけ。"""
     demo = demo_mode()
-    return [s for s in all_sources() if s.configured and (demo or s.id not in SAMPLES)]
+    return [s for s in all_sources() if demo or s.id not in SAMPLES]
+
+
+def usable() -> list[Source]:
+    """今使えるソース（設定がそろっているもの）。"""
+    return [s for s in listed() if s.configured]
 
 
 class SourceError(Exception):
@@ -38,11 +56,9 @@ def describe() -> list[dict]:
 
 def status() -> list[dict]:
     """接続確認の画面に出す一覧。設定されていないソースも、必要な設定と一緒に出す。"""
-    demo = demo_mode()
     return [
         {"id": s.id, "label": s.label, "configured": s.configured, "requires": s.requires, "mcp": s.id.startswith("mcp_")}
-        for s in all_sources()
-        if demo or s.id not in SAMPLES
+        for s in listed()
     ]
 
 

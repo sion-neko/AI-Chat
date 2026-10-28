@@ -1,25 +1,26 @@
 """ローカルWeb UI。標準ライブラリのHTTPサーバーで静的ファイルとチャットAPIを返す。
 
+ここに置くのは、リクエストの検証と、各モジュールへの受け渡しだけ。
+調査を走らせて保存するのは app/turns.py、進み具合を配るのは app/jobs.py。
+
 API:
   GET    /api/config
   GET    /api/conversations?q=&archived=1&folder= 会話一覧。q は空白区切りのANDで、タイトルと中身を探す。folder でフォルダを絞る
-  PATCH  /api/conversations/{id}          {title?, archived?, folder_id?, unread?} 名前・アーカイブ・フォルダ・未読の印を変える（folder_id: null でフォルダの外へ）
   POST   /api/conversations               {content, sources, folder_id?, images?} 新しい会話を作って最初の質問をする
+  GET    /api/conversations/{id}          会話の中身（ターン単位）
+  PATCH  /api/conversations/{id}          {title?, archived?, folder_id?, unread?} 名前・アーカイブ・フォルダ・未読の印を変える（folder_id: null でフォルダの外へ）
+  DELETE /api/conversations/{id}          会話を消す（調査中なら止める）
+  POST   /api/conversations/{id}/messages {content, sources, from_turn?, followup?, images?} 続きの質問をする（app/turns.py の ask）
+  POST   /api/turns/{turn_id}/cancel      調査中のターンを中止する
+  GET    /api/events                      調査の進み具合（NDJSON。つないでいる間ずっと流れる）
+  GET    /api/traces/{trace_id}           1ターン分のLLMとのやりとり
+  GET    /api/images/{id}                 質問に添えられた画像
   GET    /api/folders                     フォルダの一覧
   POST   /api/folders                     {name} フォルダを作る
   PATCH  /api/folders/{id}                {name?, memo?, selection?}
   DELETE /api/folders/{id}                フォルダを消す（中の調査はフォルダの外に出る）
   GET    /api/settings                    {memo, selection} 全体のメモと、フォルダの外で選んだソースと範囲
   PATCH  /api/settings                    {memo?, selection?}
-  GET    /api/conversations/{id}          会話の中身（ターン単位）
-  GET    /api/traces/{trace_id}           1ターン分のLLMとのやりとり
-  POST   /api/conversations/{id}/messages {content, sources, from_turn?, images?} 続きの質問をする
-                                          from_turn（質問のターンの位置）があれば、そこから後を消して質問し直す（成功したときだけ置き換える）
-                                          画像を送らずにやり直したときは、元の質問の画像を使う
-  GET    /api/images/{id}                 質問に添えられた画像
-  DELETE /api/conversations/{id}
-  POST   /api/turns/{turn_id}/cancel        調査中のターンを中止する
-  GET    /api/events                      調査の進み具合（NDJSON。つないでいる間ずっと流れる）
   GET    /api/characters                  所長と所員（使えるソースの分）
   PUT    /api/characters/{key}            {name, persona} キャラクターを編集する。key は "director" かソースID
   DELETE /api/characters/{key}            キャラクターを既定に戻す
@@ -38,7 +39,7 @@ selection は入力欄の選択を覚えておく形 {"unchecked": [外したソ
 
 質問するPOSTは、調査を始めて {turn_id, conversation_id} をすぐ返す（同じ会話で調査中なら400）。
 調査は画面を閉じても最後まで続き、進み具合は /api/events に1行1イベントで流れる（app/jobs.py）。
-つないだときは、調査中のものを始めから流し直す。どのイベントも turn_id を持つ。
+つないだときは、調査中のものを始めから流し直す。調査のイベントは turn_id を持つ。
   {"type": "job", "conversation_id", "title", "question", "index", "replace", "followup", "consult", "image_count", "started_at"}  調査を始めた
   {"type": "images_start", "agent", "count"}    所長が添えられた画像を読んでいる
   {"type": "intake_start", "agent"}             所長が依頼を受け付けている（曖昧なら聞き返す）
@@ -52,44 +53,45 @@ selection は入力欄の選択を覚えておく形 {"unchecked": [外したソ
   {"type": "done", "conversation_id", "question", "turn"}  質問と回答のターン（保存済み。会話には未読の印が付く）
   {"type": "cancelled", "conversation_id", "deleted"}  中止した（何も保存しない。新しい会話なら会話ごと消す: deleted）
   {"type": "error", "conversation_id", "deleted", "message"}
-  {"type": "ready"}                             つないだときに、調査中のものを流し終えた（turn_id なし）
-  {"type": "title", "conversation_id", "title"}  所長が調査に題名を付けた（最初の回答のあと。turn_id なし）
-  {"type": "ping"}                              何もないときにときどき来る（turn_id なし）
-入力の検証で弾くときは、ストリームを始める前に通常のJSONで400を返す。
+調査に紐づかないイベント（turn_id なし）:
+  {"type": "ready"}                             つないだときに、調査中のものを流し終えた
+  {"type": "title", "conversation_id", "title"}  所長が調査に題名を付けた（最初の回答のあと）
+  {"type": "ping"}                              何もないときにときどき来る
 """
 
+import base64
 import json
 import os
 import queue
 import re
-import threading
 import traceback
 import urllib.parse
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import base64
-
-from app import agent, characters, db, destination, jobs, models, sources
+from app import agent, characters, db, destination, jobs, models, sources, turns
+from app.errors import InputError, NotFound
 from app.sources import mcp_servers
 
 STATIC_DIR = Path(__file__).parent / "static"
 CONTENT_TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
-TITLE_LENGTH = 40
+TITLE_LENGTH = 80
 FOLDER_NAME_LENGTH = 40
-# メモはそのままプロンプトに入るので、ローカルLLMの文脈を使い切らない長さに抑える
-MEMO_LENGTH = 2000
 # 質問に添えられる画像の枚数と大きさ
 IMAGE_COUNT = 4
 IMAGE_SIZE = 5 * 1024 * 1024
+IMAGE_URL = re.compile(r"data:(image/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)")
 # 進み具合のストリームで、何もないときに書く間隔（秒）
 EVENTS_PING = 15
-IMAGE_URL = re.compile(r"data:(image/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)")
+
+# 画面を開いてよいホスト名。ほかの名前で届いたリクエストは断る（DNSリバインディングで、
+# 別のサイトから手元の会話を読まれないように）。ALLOWED_HOSTS（カンマ区切り）で足せる
+ALLOWED_HOSTS = {"localhost", "127.0.0.1", "[::1]", *filter(None, os.environ.get("ALLOWED_HOSTS", "").split(","))}
 
 
-class InputError(Exception):
-    """リクエストの中身が不正。メッセージはそのまま画面に出る。"""
+# ---- 入力の検証 ----
 
 
 def _images(value) -> list[tuple[str, bytes]]:
@@ -112,8 +114,16 @@ def _images(value) -> list[tuple[str, bytes]]:
     return images
 
 
-def _data_url(mime: str, data: bytes) -> str:
-    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+def question(req: dict) -> turns.Question:
+    """質問するPOSTの中身を確かめる。会話を作る前に呼ぶ（使えないソースで空の会話が残らないように）。"""
+    selected = sources.resolve(req["sources"])
+    return turns.Question(
+        content=req["content"],
+        sources=selected,
+        scopes=sources.resolve_scopes(selected, req.get("scopes") or {}),
+        clarify=not req.get("skip_clarify"),
+        images=_images(req.get("images")),
+    )
 
 
 def _name(value, length: int) -> str:
@@ -133,8 +143,8 @@ def _folder_id(value) -> str | None:
 
 def _memo(value) -> str:
     memo = str(value).strip()
-    if len(memo) > MEMO_LENGTH:
-        raise InputError(f"メモは{MEMO_LENGTH}文字以内にしてください（今は{len(memo)}文字）")
+    if len(memo) > turns.MEMO_LENGTH:
+        raise InputError(f"メモは{turns.MEMO_LENGTH}文字以内にしてください（今は{len(memo)}文字）")
     return memo
 
 
@@ -152,10 +162,10 @@ def _selection(value) -> dict:
 
 
 def conversation_changes(req: dict) -> dict:
-    """会話の名前・アーカイブ・フォルダの変更を確かめて、db.update_conversation に渡せる形にする。"""
+    """会話の名前・アーカイブ・フォルダ・未読の変更を確かめて、db.update_conversation に渡せる形にする。"""
     changes = {}
     if "title" in req:
-        changes["title"] = _name(req["title"], TITLE_LENGTH * 2)
+        changes["title"] = _name(req["title"], TITLE_LENGTH)
     if "archived" in req:
         changes["archived"] = bool(req["archived"])
     if "folder_id" in req:
@@ -176,60 +186,27 @@ def folder_changes(req: dict) -> dict:
     return changes
 
 
+def request_allowed(method: str, host: str | None, origin: str | None) -> bool:
+    """手元のブラウザでこのアプリの画面から来たリクエストか。
+
+    Host が許したホスト名でなければ断る。書き換えるリクエスト（GET以外）は、Origin があれば同じホストからのものに限る
+    （ほかのサイトに開かれたページから、調査を頼んだり消したりされないように）。
+    """
+    host = host or ""
+    # [::1]:8080 の : で切らないよう、IPv6 はかっこまでを名前とみなす
+    hostname = host if host.endswith("]") else host.rsplit(":", 1)[0]
+    if hostname not in ALLOWED_HOSTS:
+        return False
+    if method != "GET" and origin and urllib.parse.urlsplit(origin).netloc != host:
+        return False
+    return True
+
+
+# ---- 画面に返す中身 ----
+
+
 def settings() -> dict:
     return {"memo": db.get_setting("memo", ""), "selection": db.get_setting("selection", {})}
-
-
-def add_to_memo(conv_id: str, notes: list[dict]) -> list[dict]:
-    """所長が決めた内容をメモに書き足す。上限を超えるものは書かない。
-
-    返り値は [{"scope", "note", "folder"（フォルダ名。全体なら None）, "saved"}]。画面に出す。
-    """
-    folder = db.get_folder((db.get_conversation(conv_id) or {}).get("folder_id") or "")
-    result = []
-    for n in notes:
-        target = folder if n["scope"] == "folder" else None
-        if n["scope"] == "folder" and not folder:
-            continue
-        current = target["memo"] if target else db.get_setting("memo", "")
-        memo = f"{current}\n- {n['note']}".strip()
-        saved = len(memo) <= MEMO_LENGTH
-        if saved and target:
-            db.update_folder(target["id"], memo=memo)
-            target["memo"] = memo
-        elif saved:
-            db.set_setting("memo", memo)
-        result.append({"scope": n["scope"], "note": n["note"], "folder": target["name"] if target else None, "saved": saved})
-    return result
-
-
-def followup_since(history: list[dict], conversation: dict) -> str:
-    """「その後どうなった？」で調べ始める日。直前の回答を調べた日（日付を持つ前の回答は、会話の更新日）。"""
-    last = history[-1] if history else None
-    if not last or last["role"] != "assistant" or last.get("kind") in ("clarify", "chat"):
-        raise InputError("続報を調べられるのは、所長が回答した後だけです")
-    return last.get("date") or conversation["updated_at"][:10]
-
-
-def retitle(conv_id: str):
-    """最初の回答が出たら、所長に調査の題名を付けさせる（題名が最初の質問のままのときだけ。名前を変えていたら触らない）。"""
-    conversation = db.get_conversation(conv_id)
-    turns = db.load_turns(conv_id) or []
-    answers = [t for t in turns if t["role"] == "assistant" and t.get("kind") != "clarify"]
-    if not conversation or len(answers) != 1 or conversation["title"] != turns[0]["content"][:TITLE_LENGTH]:
-        return
-    questions = agent.member_questions(turns[:-2], turns[-2]["content"])
-    if title := agent.make_title(questions, answers[0]["content"]):
-        db.update_conversation(conv_id, title=title)
-        jobs.broadcast({"type": "title", "conversation_id": conv_id, "title": title})
-
-
-def memos_for(conv_id: str | None, folder_id: str | None) -> dict:
-    """調査のプロンプトに入れるメモ。会話がフォルダに入っていれば、そのフォルダのメモも。"""
-    if conv_id:
-        folder_id = (db.get_conversation(conv_id) or {}).get("folder_id")
-    folder = db.get_folder(folder_id) if folder_id else None
-    return {"global": db.get_setting("memo", ""), "folder": {"name": folder["name"], "memo": folder["memo"]} if folder else None}
 
 
 def config() -> dict:
@@ -257,6 +234,12 @@ def character_list() -> list[dict]:
     return result
 
 
+def _character_key(key: str) -> str:
+    if key != characters.DIRECTOR_KEY and key not in {s["id"] for s in sources.describe()}:
+        raise NotFound
+    return key
+
+
 def status() -> dict:
     return {
         "llm": {"base_url": os.environ["LLM_BASE_URL"], "model": os.environ["LLM_MODEL"]},
@@ -266,322 +249,258 @@ def status() -> dict:
 
 def check() -> dict:
     """LLMとソースの接続確認を並列に行う。"""
-    all_sources = [s for s in sources.all_sources() if sources.demo_mode() or s.id not in sources.SAMPLES]
+    listed = sources.listed()
     with ThreadPoolExecutor() as pool:
         llm = pool.submit(agent.check_llm)
-        results = dict(zip((s.id for s in all_sources), pool.map(sources.check, all_sources)))
+        results = dict(zip((s.id for s in listed), pool.map(sources.check, listed)))
         return {"llm": llm.result(), "sources": results}
 
 
-# 画面を開いてよいホスト名。ほかの名前で届いたリクエストは断る（DNSリバインディングで、
-# 別のサイトから手元の会話を読まれないように）。ALLOWED_HOSTS（カンマ区切り）で足せる
-ALLOWED_HOSTS = {"localhost", "127.0.0.1", "[::1]", *filter(None, os.environ.get("ALLOWED_HOSTS", "").split(","))}
+def mcp_listing() -> dict:
+    return {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()}
 
 
-def request_allowed(method: str, host: str | None, origin: str | None) -> bool:
-    """手元のブラウザでこのアプリの画面から来たリクエストか。
+# ---- 振り分け ----
 
-    Host が許したホスト名でなければ断る。書き換えるリクエスト（GET以外）は、Origin があれば同じホストからのものに限る
-    （ほかのサイトに開かれたページから、調査を頼んだり消したりされないように）。
-    """
-    hostname = (host or "").rsplit(":", 1)[0] if not (host or "").endswith("]") else host
-    if hostname not in ALLOWED_HOSTS:
-        return False
-    if method != "GET" and origin and urllib.parse.urlsplit(origin).netloc != host:
-        return False
-    return True
+# (メソッド, パスの正規表現, 処理)。処理は (Handler, パスから取った値...) を受け取り、
+# JSONで返す中身を返す。自分でレスポンスを書いたとき（ストリーム・画像）は None を返す。
+ROUTES: list[tuple[str, re.Pattern, Callable]] = []
 
 
-def _character_key(key: str) -> bool:
-    return key == characters.DIRECTOR_KEY or key in {s["id"] for s in sources.describe()}
+def route(method: str, pattern: str):
+    def register(fn):
+        ROUTES.append((method, re.compile(pattern), fn))
+        return fn
+
+    return register
+
+
+@route("GET", r"/api/config")
+def get_config(h):
+    return config()
+
+
+@route("GET", r"/api/events")
+def get_events(h):
+    h.stream_events()
+
+
+@route("GET", r"/api/conversations")
+def list_conversations(h):
+    return db.list_conversations(h.query.get("q", ""), h.query.get("archived") == "1", h.query.get("folder") or None)
+
+
+@route("POST", r"/api/conversations")
+def create_conversation(h):
+    req = h.read_json()
+    job = turns.ask_new(question(req), _folder_id(req.get("folder_id")))
+    return {"turn_id": job.turn_id, "conversation_id": job.conversation_id}
+
+
+@route("GET", r"/api/conversations/(\w+)")
+def get_conversation(h, conv_id):
+    if (found := db.load_turns(conv_id)) is None:
+        raise NotFound
+    return {"id": conv_id, "turns": found}
+
+
+@route("PATCH", r"/api/conversations/(\w+)")
+def update_conversation(h, conv_id):
+    if not db.update_conversation(conv_id, **conversation_changes(h.read_json())):
+        raise NotFound
+    return {}
+
+
+@route("DELETE", r"/api/conversations/(\w+)")
+def delete_conversation(h, conv_id):
+    turns.cancel_conversation(conv_id)
+    db.delete_conversation(conv_id)
+    return {}
+
+
+@route("POST", r"/api/conversations/(\w+)/messages")
+def ask_more(h, conv_id):
+    req = h.read_json()
+    job = turns.ask(conv_id, question(req), req.get("from_turn"), bool(req.get("followup")))
+    return {"turn_id": job.turn_id, "conversation_id": conv_id}
+
+
+@route("POST", r"/api/turns/(\w+)/cancel")
+def cancel_turn(h, turn_id):
+    if job := jobs.get(turn_id):
+        job.cancel.set()
+    return {}
+
+
+@route("GET", r"/api/traces/(\w+)")
+def get_trace(h, trace_id):
+    if (trace := db.load_trace(trace_id)) is None:
+        raise NotFound
+    return trace
+
+
+@route("GET", r"/api/images/(\w+)")
+def get_image(h, image_id):
+    if (image := db.load_image(image_id)) is None:
+        raise NotFound
+    mime, data = image
+    h.send_bytes(data, mime, cache=True)
+
+
+@route("GET", r"/api/folders")
+def list_folders(h):
+    return db.list_folders()
+
+
+@route("POST", r"/api/folders")
+def create_folder(h):
+    return db.get_folder(db.create_folder(_name(h.read_json().get("name", ""), FOLDER_NAME_LENGTH)))
+
+
+@route("PATCH", r"/api/folders/(\w+)")
+def update_folder(h, folder_id):
+    if not db.update_folder(folder_id, **folder_changes(h.read_json())):
+        raise NotFound
+    return db.get_folder(folder_id)
+
+
+@route("DELETE", r"/api/folders/(\w+)")
+def delete_folder(h, folder_id):
+    db.delete_folder(folder_id)
+    return {}
+
+
+@route("GET", r"/api/settings")
+def get_settings(h):
+    return settings()
+
+
+@route("PATCH", r"/api/settings")
+def update_settings(h):
+    req = h.read_json()
+    if "memo" in req:
+        db.set_setting("memo", _memo(req["memo"]))
+    if "selection" in req:
+        db.set_setting("selection", _selection(req["selection"]))
+    return settings()
+
+
+@route("GET", r"/api/characters")
+def list_characters(h):
+    return character_list()
+
+
+@route("PUT", r"/api/characters/(\w+)")
+def save_character(h, key):
+    req = h.read_json()
+    characters.save(_character_key(key), req["name"], req["persona"])
+    return character_list()
+
+
+@route("DELETE", r"/api/characters/(\w+)")
+def reset_character(h, key):
+    characters.reset(_character_key(key))
+    return character_list()
+
+
+@route("GET", r"/api/sources/(\w+)/scopes")
+def list_scopes(h, source_id):
+    return sources.scope_choices(source_id)
+
+
+@route("GET", r"/api/mcp")
+def get_mcp(h):
+    return mcp_listing()
+
+
+@route("POST", r"/api/mcp")
+def add_mcp(h):
+    conf = h.read_json()
+    mcp_servers.save(mcp_servers.new_key(str(conf.get("label", ""))), conf)
+    return mcp_listing()
+
+
+@route("PUT", r"/api/mcp/(\w+)")
+def update_mcp(h, key):
+    if key not in mcp_servers.read_config():
+        raise NotFound
+    mcp_servers.save(key, h.read_json())
+    return mcp_listing()
+
+
+@route("DELETE", r"/api/mcp/(\w+)")
+def delete_mcp(h, key):
+    mcp_servers.delete(key)
+    return mcp_listing()
+
+
+@route("GET", r"/api/status")
+def get_status(h):
+    return status()
+
+
+@route("POST", r"/api/check")
+def run_check(h):
+    return check()
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, status: int, body: bytes, content_type: str):
+    def do_GET(self):
+        self._dispatch()
+
+    do_POST = do_PUT = do_PATCH = do_DELETE = do_GET
+
+    def _dispatch(self):
+        if not request_allowed(self.command, self.headers.get("Host"), self.headers.get("Origin")):
+            return self.send_json(403, {"error": "このアプリは、自分のPCのブラウザから開いてください"})
+        url = urllib.parse.urlsplit(self.path)
+        self.query = dict(urllib.parse.parse_qsl(url.query))
+        try:
+            for method, pattern, fn in ROUTES:
+                if method == self.command and (m := pattern.fullmatch(url.path)):
+                    if (result := fn(self, *m.groups())) is not None:
+                        self.send_json(200, result)
+                    return
+            if self.command == "GET" and not url.path.startswith("/api/"):
+                return self._send_static(url.path)
+            raise NotFound
+        except NotFound:
+            self.send_json(404, {"error": "not found"})
+        except (InputError, sources.SourceError, characters.CharacterError, mcp_servers.McpConfigError) as e:
+            self.send_json(400, {"error": str(e)})
+        except Exception as e:
+            traceback.print_exc()
+            self.send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def read_json(self) -> dict:
+        return json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+
+    def send_bytes(self, body: bytes, content_type: str, cache: bool = False):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if cache:
+            self.send_header("Cache-Control", "private, max-age=86400")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_json(self, status: int, data):
+        body = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(status)
-        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_json(self, status: int, data):
-        self._send(status, json.dumps(data, ensure_ascii=False).encode(), "application/json")
+    def _send_static(self, path: str):
+        name = "index.html" if path == "/" else path.removeprefix("/static/")
+        file = (STATIC_DIR / name).resolve()
+        # static の外（../ など）は返さない
+        if file.parent != STATIC_DIR.resolve() or not file.is_file():
+            raise NotFound
+        self.send_bytes(file.read_bytes(), f"{CONTENT_TYPES.get(file.suffix, 'application/octet-stream')}; charset=utf-8")
 
-    def _read_json(self) -> dict:
-        return json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-
-    def _handle(self, fn):
-        if not request_allowed(self.command, self.headers.get("Host"), self.headers.get("Origin")):
-            return self._send_json(403, {"error": "このアプリは、自分のPCのブラウザから開いてください"})
-        try:
-            fn()
-        except (sources.SourceError, characters.CharacterError, InputError, mcp_servers.McpConfigError) as e:
-            self._send_json(400, {"error": str(e)})
-        except Exception as e:
-            traceback.print_exc()
-            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
-
-    def do_GET(self):
-        self._handle(self._get)
-
-    def do_POST(self):
-        self._handle(self._post)
-
-    def do_PUT(self):
-        self._handle(self._put)
-
-    def do_PATCH(self):
-        self._handle(self._patch)
-
-    def do_DELETE(self):
-        self._handle(self._delete)
-
-    def _get(self):
-        url = urllib.parse.urlsplit(self.path)
-        query = dict(urllib.parse.parse_qsl(url.query))
-        if self.path == "/api/config":
-            return self._send_json(200, config())
-        if self.path == "/api/events":
-            return self._stream_events()
-        if url.path == "/api/conversations":
-            convs = db.list_conversations(query.get("q", ""), query.get("archived") == "1", query.get("folder") or None)
-            return self._send_json(200, convs)
-        if self.path == "/api/folders":
-            return self._send_json(200, db.list_folders())
-        if self.path == "/api/settings":
-            return self._send_json(200, settings())
-        if self.path == "/api/characters":
-            return self._send_json(200, character_list())
-        if m := re.fullmatch(r"/api/sources/(\w+)/scopes", self.path):
-            return self._send_json(200, sources.scope_choices(m[1]))
-        if self.path == "/api/mcp":
-            return self._send_json(200, {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()})
-        if self.path == "/api/status":
-            return self._send_json(200, status())
-        if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
-            turns = db.load_turns(m[1])
-            if turns is None:
-                return self._send_json(404, {"error": "not found"})
-            return self._send_json(200, {"id": m[1], "turns": turns})
-        if m := re.fullmatch(r"/api/traces/(\w+)", self.path):
-            trace = db.load_trace(m[1])
-            if trace is None:
-                return self._send_json(404, {"error": "not found"})
-            return self._send_json(200, trace)
-        if m := re.fullmatch(r"/api/images/(\w+)", self.path):
-            image = db.load_image(m[1])
-            if image is None:
-                return self.send_error(404)
-            mime, data = image
-            self.send_response(200)
-            self.send_header("Content-Type", mime)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "private, max-age=86400")
-            self.end_headers()
-            return self.wfile.write(data)
-
-        name = "index.html" if self.path == "/" else self.path.removeprefix("/static/")
-        path = (STATIC_DIR / name).resolve()
-        if path.parent != STATIC_DIR.resolve() or not path.is_file():
-            return self.send_error(404)
-        self._send(200, path.read_bytes(), CONTENT_TYPES.get(path.suffix, "application/octet-stream"))
-
-    def _post(self):
-        if self.path == "/api/conversations":
-            req = self._read_json()
-            # 会話を作る前に検証する（使えないソースで空の会話が残らないように）
-            selected = sources.resolve(req["sources"])
-            scopes = sources.resolve_scopes(selected, req.get("scopes") or {})
-            folder_id = _folder_id(req.get("folder_id"))
-            images = _images(req.get("images"))
-            conv_id = db.create_conversation(req["content"][:TITLE_LENGTH], folder_id)
-            return self._start_turn(
-                conv_id, [], req["content"], selected, scopes, is_new=True, clarify=not req.get("skip_clarify"), images=images
-            )
-        if m := re.fullmatch(r"/api/conversations/(\w+)/messages", self.path):
-            history = db.load_turns(m[1])
-            if history is None:
-                return self._send_json(404, {"error": "not found"})
-            req = self._read_json()
-            selected = sources.resolve(req["sources"])
-            scopes = sources.resolve_scopes(selected, req.get("scopes") or {})
-            images = _images(req.get("images"))
-            image_ids = None
-            start = req.get("from_turn")
-            if start is not None:
-                if not (isinstance(start, int) and 0 <= start < len(history) and history[start]["role"] == "user"):
-                    raise InputError("やり直す質問の位置が正しくありません")
-                # やり直しで画像を送り直さなかったときは、元の質問の画像をそのまま使う
-                if not images and history[start].get("images"):
-                    image_ids = history[start]["images"]
-                    images = [db.load_image(i) for i in image_ids]
-                history = history[:start]
-            since = None
-            if req.get("followup"):
-                if not selected:
-                    raise InputError("続報を調べるには、調べる場所を選んでください")
-                since = followup_since(history, db.get_conversation(m[1]))
-            return self._start_turn(
-                m[1],
-                history,
-                req["content"],
-                selected,
-                scopes,
-                is_new=False,
-                replace_from=start,
-                clarify=not req.get("skip_clarify"),
-                images=images,
-                image_ids=image_ids,
-                since=since,
-            )
-        if self.path == "/api/mcp":
-            conf = self._read_json()
-            mcp_servers.save(mcp_servers.new_key(str(conf.get("label", ""))), conf)
-            return self._send_json(200, {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()})
-        if self.path == "/api/folders":
-            folder_id = db.create_folder(_name(self._read_json().get("name", ""), FOLDER_NAME_LENGTH))
-            return self._send_json(200, db.get_folder(folder_id))
-        if self.path == "/api/check":
-            return self._send_json(200, check())
-        if m := re.fullmatch(r"/api/turns/(\w+)/cancel", self.path):
-            if job := jobs.get(m[1]):
-                job.cancel.set()
-            return self._send_json(200, {})
-        self.send_error(404)
-
-    def _patch(self):
-        if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
-            if not db.update_conversation(m[1], **conversation_changes(self._read_json())):
-                return self._send_json(404, {"error": "not found"})
-            return self._send_json(200, {})
-        if m := re.fullmatch(r"/api/folders/(\w+)", self.path):
-            if not db.update_folder(m[1], **folder_changes(self._read_json())):
-                return self._send_json(404, {"error": "not found"})
-            return self._send_json(200, db.get_folder(m[1]))
-        if self.path == "/api/settings":
-            req = self._read_json()
-            if "memo" in req:
-                db.set_setting("memo", _memo(req["memo"]))
-            if "selection" in req:
-                db.set_setting("selection", _selection(req["selection"]))
-            return self._send_json(200, settings())
-        self.send_error(404)
-
-    def _put(self):
-        if m := re.fullmatch(r"/api/mcp/(\w+)", self.path):
-            if m[1] not in mcp_servers.read_config():
-                return self._send_json(404, {"error": "not found"})
-            mcp_servers.save(m[1], self._read_json())
-            return self._send_json(200, {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()})
-        if m := re.fullmatch(r"/api/characters/(\w+)", self.path):
-            if not _character_key(m[1]):
-                return self._send_json(404, {"error": "not found"})
-            req = self._read_json()
-            characters.save(m[1], req["name"], req["persona"])
-            return self._send_json(200, character_list())
-        self.send_error(404)
-
-    def _delete(self):
-        if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
-            # 調べている途中なら止める（保存先がなくなるので）
-            for job in jobs.running():
-                if job.conversation_id == m[1]:
-                    job.cancel.set()
-            db.delete_conversation(m[1])
-            return self._send_json(200, {})
-        if m := re.fullmatch(r"/api/mcp/(\w+)", self.path):
-            mcp_servers.delete(m[1])
-            return self._send_json(200, {"path": mcp_servers.CONFIG_PATH, "servers": mcp_servers.listing()})
-        if m := re.fullmatch(r"/api/folders/(\w+)", self.path):
-            db.delete_folder(m[1])
-            return self._send_json(200, {})
-        if m := re.fullmatch(r"/api/characters/(\w+)", self.path):
-            if not _character_key(m[1]):
-                return self._send_json(404, {"error": "not found"})
-            characters.reset(m[1])
-            return self._send_json(200, character_list())
-        self.send_error(404)
-
-    def _start_turn(
-        self,
-        conv_id: str,
-        history: list[dict],
-        question: str,
-        selected: list[sources.Source],
-        scopes: dict[str, list[str]],
-        is_new: bool,
-        replace_from: int | None = None,
-        clarify: bool = True,
-        images: list[tuple[str, bytes]] | None = None,
-        image_ids: list[str] | None = None,
-        since: str | None = None,
-    ):
-        """調査を別スレッドで始めて、すぐに {turn_id, conversation_id} を返す。進み具合は /api/events で配る。
-
-        images は質問に添えられた画像。調査が成功したときだけ保存する（image_ids があれば、保存済みの同じ画像）。
-        since は続報を調べるときの前回の調査日（followup_since）。
-        """
-        info = {
-            "title": (db.get_conversation(conv_id) or {}).get("title", ""),
-            "question": question,
-            # 質問のターンの位置。やり直しなら、そこから後が置き換わる
-            "index": len(history),
-            "replace": replace_from is not None,
-            "followup": since is not None,
-            # 調べる場所を選ばずに所長に相談している
-            "consult": not selected,
-            "image_count": len(images or []),
-        }
-        try:
-            job = jobs.start(conv_id, info)
-        except jobs.Busy:
-            raise InputError("この調査はまだ調べています。終わるか中止してから質問してください")
-
-        def emit(event: dict):
-            # 中止されたら、次にイベントを出そうとしたところで調査を止める
-            if job.cancel.is_set():
-                raise agent.Cancelled
-            jobs.publish(job, event)
-
-        def work():
-            try:
-                urls = [_data_url(mime, data) for mime, data in images or []]
-                turn = agent.run_turn(history, question, selected, emit, scopes, clarify, memos_for(conv_id, None), urls, since)
-                # 最後のLLMの呼び出しの間に中止された（会話が消された）なら保存しない
-                if job.cancel.is_set():
-                    raise agent.Cancelled
-                turn["trace_id"] = db.save_trace(conv_id, turn.pop("trace"))
-                if "memo_notes" in turn:
-                    turn["memo_added"] = add_to_memo(conv_id, turn.pop("memo_notes"))
-                asked = {"role": "user", "content": question}
-                if since:
-                    asked["since"] = since
-                if images:
-                    asked["images"] = image_ids or [db.save_image(conv_id, mime, data) for mime, data in images]
-                    asked["image_text"] = turn.pop("image_text", "")
-                new_turns = [asked, turn]
-                if replace_from is None:
-                    db.append_turns(conv_id, new_turns)
-                else:
-                    db.replace_turns(conv_id, replace_from, new_turns)
-                # 画面で読むまで、一覧に印を出す（見ている画面が読んだら外す）
-                db.update_conversation(conv_id, unread=True)
-                jobs.publish(job, {"type": "done", "conversation_id": conv_id, "question": asked, "turn": turn})
-                retitle(conv_id)
-            except agent.Cancelled:
-                if is_new:
-                    db.delete_conversation(conv_id)
-                jobs.publish(job, {"type": "cancelled", "conversation_id": conv_id, "deleted": is_new})
-            except Exception as e:
-                traceback.print_exc()
-                if is_new:
-                    db.delete_conversation(conv_id)
-                jobs.publish(job, {"type": "error", "conversation_id": conv_id, "deleted": is_new, "message": agent.explain_error(e)})
-
-        threading.Thread(target=work, daemon=True).start()
-        return self._send_json(200, {"turn_id": job.turn_id, "conversation_id": conv_id})
-
-    def _stream_events(self):
+    def stream_events(self):
         """調査の進み具合を、つないでいる間ずっと1行1イベントで流す。調査中のものは溜めた分から流す。"""
         q = jobs.subscribe()
         # Content-Length を付けず、閉じられるまで書き続ける（HTTP/1.0）
