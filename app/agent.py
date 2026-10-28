@@ -299,6 +299,8 @@ def _view_image_tool(source: Source, trace: Trace, who: str) -> BaseTool:
 
 
 def _tool_loop(system_prompt: str, tools: list[BaseTool], trace: Trace, who: str):
+    """所員の調査の流れ（LangGraph）。LLMがツールを呼ばなくなる（報告を書く）まで、検索と読み直しを繰り返す。"""
+
     def call_llm(state: MessagesState):
         return {"messages": [_call([SystemMessage(system_prompt), *state["messages"]], trace, who, tools)]}
 
