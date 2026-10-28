@@ -373,7 +373,7 @@ function arrived(conversationId, title, turn) {
   notify(heading, title, conversationId);
 }
 
-// 画面の外（デスクトップ通知）と中（右下の知らせ）で知らせる。conversationId があれば、押すとその会話を開く
+// 画面の外（デスクトップ通知）と中（右上の知らせ）で知らせる。conversationId があれば、押すとその会話を開く
 function notify(heading, body, conversationId) {
   if (document.hidden && "Notification" in window && Notification.permission === "granted") {
     const n = new Notification(heading, { body, icon: "/static/ghost.svg", tag: conversationId ?? undefined });
@@ -751,7 +751,6 @@ function renderScopeList() {
 
 scopeFilter.addEventListener("input", renderScopeList);
 
-
 document.getElementById("scope-clear").addEventListener("click", () => {
   scopeEditing.checked.clear();
   renderScopeList();
@@ -815,12 +814,12 @@ async function openConversation(id) {
   if (activeFolderId() !== folderBefore) applySelection();
   renderHead();
   const nodes = [];
+  // 質問のターンごとに入れ物を作り、続く回答をその中に入れる
   data.turns.forEach((t, i) => {
     if (t.role === "user") {
       const images = (t.images ?? []).map((id) => `/api/images/${id}`);
       nodes.push(turnView(t.content, i, { images, imageText: t.image_text, since: t.since }));
-    }
-    else nodes.at(-1).append(answerView(t, i - 1));
+    } else nodes.at(-1).append(answerView(t, i - 1));
   });
   turnCount = data.turns.length;
   log.replaceChildren(...nodes);
@@ -984,11 +983,11 @@ function renderFolders() {
   folderList.replaceChildren(item(null, "すべての調査"), ...folders.map((f) => item(f.id, f.name, f.count)));
 }
 
-document.getElementById("new-folder").addEventListener("click", (e) => {
+document.getElementById("new-folder").addEventListener("click", () => {
   if (folderList.querySelector(".folder-input")) return;
   const field = el("input", "folder-input");
   field.placeholder = "フォルダの名前（案件名など）";
-  field.maxLength = 40;
+  field.maxLength = 40; // サーバーの上限（web.FOLDER_NAME_LENGTH）と同じ
   let done = false;
   const finish = async (save) => {
     if (done) return;
@@ -1015,7 +1014,6 @@ function openFolderDialog(id) {
   document.getElementById("folder-status").textContent = "";
   folderDialog.showModal();
 }
-
 
 document.getElementById("folder-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1047,6 +1045,10 @@ document.getElementById("delete-folder").addEventListener("click", async () => {
 
 const archiveButton = document.getElementById("archive");
 const crumb = document.getElementById("folder-crumb");
+// この調査の操作（⋯のメニュー）と、その中のフォルダへ移す一覧
+const menuButton = document.getElementById("conv-menu-button");
+const menu = document.getElementById("conv-menu");
+const moveSelect = document.getElementById("move-folder");
 
 // 新しい会話を送った直後は、まだ一覧にないので draft（仮の名前）を出す
 function renderHead(draft) {
@@ -1064,10 +1066,11 @@ function renderHead(draft) {
   if (c) {
     // フォルダへ移すメニュー。今のフォルダには印を付ける
     const item = (id, name, iconName) => {
-      const button = el("button", (c.folder_id ?? null) === id ? "current" : "");
+      const current = (c.folder_id ?? null) === id;
+      const button = el("button", current ? "current" : "");
       button.setAttribute("role", "menuitemradio");
-      button.setAttribute("aria-checked", String((c.folder_id ?? null) === id));
-      button.append(icon((c.folder_id ?? null) === id ? "check" : iconName), name);
+      button.setAttribute("aria-checked", String(current));
+      button.append(icon(current ? "check" : iconName), name);
       button.addEventListener("click", () => moveTo(id));
       return button;
     };
@@ -1080,7 +1083,7 @@ function renameConversation() {
   if (!c || titleEl.querySelector("input")) return;
   const field = el("input", "title-input");
   field.value = c.title;
-  field.maxLength = 80;
+  field.maxLength = 80; // サーバーの上限（web.TITLE_LENGTH）と同じ
   const done = async (save) => {
     const title = field.value.trim();
     if (save && title && title !== c.title) {
@@ -1106,9 +1109,6 @@ function renameConversation() {
 titleEl.addEventListener("click", renameConversation);
 
 crumb.addEventListener("click", () => startNew(activeFolderId()));
-
-const menuButton = document.getElementById("conv-menu-button");
-const menu = document.getElementById("conv-menu");
 
 function closeMenu() {
   menu.hidden = true;
@@ -1144,8 +1144,6 @@ archiveButton.addEventListener("click", async () => {
   renderHead();
   await refreshList();
 });
-
-const moveSelect = document.getElementById("move-folder");
 
 // 開いている調査を別のフォルダへ移す
 async function moveTo(folderId) {
@@ -1508,7 +1506,9 @@ function progressView(startedAt = Date.now() / 1000, consult = false) {
   tick();
   // 画面から外れたら（回答に置き換わった・別の会話を開いた）止める。作ってすぐ画面に足すので、最初の1秒の間には足されている
   const timer = setInterval(() => (node.isConnected ? tick() : clearInterval(timer)), 1000);
-  meta.textContent = consult ? "考えています…" : "所員が調べています…";
+  // 所員が動き出す前・つなぎ直した直後の文言
+  const waiting = consult ? "考えています…" : "所員が調べています…";
+  meta.textContent = waiting;
   const answer = el("div", "markdown streaming");
   const record = el("details", "record");
   record.open = true;
@@ -1521,7 +1521,6 @@ function progressView(startedAt = Date.now() / 1000, consult = false) {
 
   // ソースごとの今の行。再調査が始まると、その所員の行は再調査の行に切り替わる
   const rows = new Map();
-  const rowFor = (source) => rows.get(source);
 
   // 届いた分の回答。描き直しは画面の更新1回につき1度にまとめる
   let answerText = "";
@@ -1543,20 +1542,19 @@ function progressView(startedAt = Date.now() / 1000, consult = false) {
       meta.textContent = "依頼の内容を確かめています…";
     } else if (event.type === "member_start") {
       record.hidden = false;
-      meta.textContent = "所員が調べています…";
+      meta.textContent = waiting;
       if (!rows.has(event.source)) {
         const row = memberRow(event.agent, sourceLabel(event.source));
         rows.set(event.source, row);
         members.append(row.node);
       }
-      rowFor(event.source).set("busy", "調査中", "");
+      rows.get(event.source).set("busy", "調査中", "");
     } else if (event.type === "tool") {
       const query = event.args.query ?? JSON.stringify(event.args);
-      rowFor(event.source).set("busy", "調査中", `「${query}」で検索`);
+      rows.get(event.source).set("busy", "調査中", `「${query}」で検索`);
     } else if (event.type === "member_done") {
       const r = event.report;
-      const row = rowFor(r.source);
-      row.set(r.error ? "failed" : "done", r.error ? "失敗" : "報告済み", r.error ? "" : memberNote(r));
+      rows.get(r.source).set(r.error ? "failed" : "done", r.error ? "失敗" : "報告済み", r.error ? "" : memberNote(r));
     } else if (event.type === "director_start") {
       directorName = event.agent;
       meta.textContent = consult ? "考えています…" : "報告をまとめています…";
@@ -1579,7 +1577,7 @@ function progressView(startedAt = Date.now() / 1000, consult = false) {
   };
   // つなぎ直したときに、始めから流れてくる進み具合で描き直す
   const reset = () => {
-    meta.textContent = consult ? "考えています…" : "所員が調べています…";
+    meta.textContent = waiting;
     answerText = "";
     answer.replaceChildren();
     members.replaceChildren();
@@ -1637,13 +1635,17 @@ function memberNote(report) {
   return [`検索${report.steps.length}回`, report.seconds !== undefined && formatSeconds(report.seconds)].filter(Boolean).join(" · ");
 }
 
+// 調査中の経過時間（秒は2けたにそろえて、数字が揺れないように）
 function formatElapsed(seconds) {
   const s = Math.max(0, Math.floor(seconds));
   return s < 60 ? `${s}秒` : `${Math.floor(s / 60)}分${String(s % 60).padStart(2, "0")}秒`;
 }
 
+// かかった時間（1分未満は小数1けた）。四捨五入してから分と秒に分ける（「1分60秒」にならないように）
 function formatSeconds(seconds) {
-  return seconds < 60 ? `${seconds.toFixed(1)}秒` : `${Math.floor(seconds / 60)}分${Math.round(seconds % 60)}秒`;
+  if (seconds < 59.95) return `${seconds.toFixed(1)}秒`;
+  const s = Math.round(seconds);
+  return `${Math.floor(s / 60)}分${s % 60}秒`;
 }
 
 function stepView(step) {
@@ -1743,7 +1745,6 @@ async function openMemo() {
 
 document.getElementById("open-memo").addEventListener("click", openMemo);
 
-
 globalMemo.addEventListener("input", () => countMemo(globalMemo, document.getElementById("global-memo-count")));
 
 folderMemo.addEventListener("input", () => countMemo(folderMemo, document.getElementById("folder-memo-count")));
@@ -1773,7 +1774,6 @@ document.getElementById("open-status").addEventListener("click", async () => {
   closeMcpForm();
   statusDialog.showModal();
 });
-
 
 document.getElementById("run-check").addEventListener("click", async (e) => {
   const button = e.currentTarget;
@@ -1937,7 +1937,6 @@ document.getElementById("open-characters").addEventListener("click", async () =>
   characterDialog.showModal();
 });
 
-
 // 名前が変わったらソースの表示（所員の名前）も変わる
 characterDialog.addEventListener("close", loadConfig);
 
@@ -1991,7 +1990,6 @@ function labeled(text, control) {
 
 const traceDialog = document.getElementById("trace");
 
-
 const ROLE_LABELS = { system: "指示（システム）", human: "依頼", ai: "LLM", tool: "ツールの結果" };
 
 async function openTrace(traceId) {
@@ -2038,7 +2036,6 @@ function messageView(m) {
 const helpDialog = document.getElementById("help");
 
 document.getElementById("open-help").addEventListener("click", () => helpDialog.showModal());
-
 
 // ---- キーボード ----
 
