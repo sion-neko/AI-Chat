@@ -103,7 +103,7 @@ class AgentTest(unittest.TestCase):
         # 受付1回、所員2人 × (検索の判断 + 報告)、所長の回答1回とメモ1回。誰の呼び出しかと、送った内容が残る
         whos = [c["who"] for c in turn["trace"]]
         self.assertEqual(turn["llm_calls"], 7)
-        self.assertCountEqual(whos, ["シロ所長（受付）", "シロ所長", "シロ所長（メモ）","コソリ（ダミーWiki）", "コソリ（ダミーWiki）", "ポルタ（ダミーチャット）", "ポルタ（ダミーチャット）"])
+        self.assertCountEqual(whos, ["シロ所長（受付）", "シロ所長", "シロ所長（メモ）","コソリ（サンプルWiki）", "コソリ（サンプルWiki）", "ポルタ（サンプルチャット）", "ポルタ（サンプルチャット）"])
         director_call = turn["trace"][whos.index("シロ所長")]
         self.assertEqual(director_call["tools"], ["request_reinvestigation"])
         self.assertEqual(director_call["messages"][0]["role"], "system")

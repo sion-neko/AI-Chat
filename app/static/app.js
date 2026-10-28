@@ -47,18 +47,52 @@ search.addEventListener("input", () => {
 });
 document.getElementById("toggle-archive").addEventListener("click", (e) => {
   showingArchive = !showingArchive;
-  e.currentTarget.textContent = showingArchive ? "通常の一覧に戻る" : "アーカイブを見る";
+  setLabel(e.currentTarget, showingArchive ? "一覧に戻る" : "アーカイブ");
+  e.currentTarget.classList.toggle("active", showingArchive);
   document.querySelector(".sidebar").classList.toggle("archive-mode", showingArchive);
   refreshList();
 });
 archiveButton.addEventListener("click", async () => {
   const c = currentConversation();
+  closeMenu();
   await api("PATCH", `/api/conversations/${c.id}`, { archived: !c.archived });
   c.archived = !c.archived;
   renderHead();
   await refreshList();
 });
 titleEl.addEventListener("click", renameConversation);
+
+// ---- この調査の操作（⋯のメニュー） ----
+
+const menuButton = document.getElementById("conv-menu-button");
+const menu = document.getElementById("conv-menu");
+
+function closeMenu() {
+  menu.hidden = true;
+  menuButton.setAttribute("aria-expanded", "false");
+}
+
+menuButton.addEventListener("click", (e) => {
+  e.stopPropagation();
+  menu.hidden = !menu.hidden;
+  menuButton.setAttribute("aria-expanded", String(!menu.hidden));
+  if (!menu.hidden) menu.querySelector("button")?.focus();
+});
+document.addEventListener("click", (e) => !menu.hidden && !menu.contains(e.target) && closeMenu());
+document.addEventListener("keydown", (e) => e.key === "Escape" && !menu.hidden && (closeMenu(), menuButton.focus()));
+document.getElementById("rename").addEventListener("click", () => {
+  closeMenu();
+  renameConversation();
+});
+document.getElementById("delete-conversation").addEventListener("click", () => {
+  closeMenu();
+  deleteConversation(currentId);
+});
+
+// ボタンの文字だけを変える（アイコンは残す）
+function setLabel(button, text) {
+  button.replaceChildren(...button.querySelectorAll("svg"), text);
+}
 sourceBox.addEventListener("change", () => {
   selection.unchecked = [...sourceBox.querySelectorAll("input:not(:checked)")].map((box) => box.value);
   saveSelection();
@@ -626,13 +660,43 @@ let sourceList = [];
 
 async function loadConfig() {
   const c = await api("GET", "/api/config");
+  appConfig = c;
   renderDestination(c);
+  renderSetup();
   visionEnabled = c.vision;
   attachFile.accept = (c.vision ? "image/png,image/jpeg,image/webp,image/gif," : "") + TEXT_FILE_TYPES;
   directorName = c.director;
   sourceList = c.sources;
   sourceLabels = new Map(c.sources.map((s) => [s.id, s.label]));
   renderSources(c.sources);
+}
+
+// 設定（/api/config）。はじめにの案内に使う
+let appConfig = null;
+
+// 最初の画面の「はじめに」。モックのLLMやサンプルのソースで動いているときに、何を設定すれば本番で使えるかを出す
+function renderSetup() {
+  const box = document.getElementById("setup");
+  if (!box || !appConfig) return;
+  const llmReady = appConfig.model !== "mock";
+  const sourcesReady = !appConfig.demo;
+  box.hidden = llmReady && sourcesReady;
+  const step = (done, title, body) => {
+    const item = el("li", done ? "done" : "");
+    item.append(icon(done ? "check" : "circle"));
+    const text = el("div");
+    text.append(el("b", "", title), el("span", "", body));
+    item.append(text);
+    return item;
+  };
+  const list = el("ol", "setup-steps");
+  list.append(
+    step(llmReady, "LLMを決める", llmReady ? `${appConfig.model} を使っています` : "今はお試しのモックLLMです。.env の LLM_BASE_URL・LLM_MODEL に、使うLLMを書いて再起動します"),
+    step(sourcesReady, "調べる場所をつなぐ", sourcesReady ? "つないだ場所を調べます" : "今はサンプルの架空のデータを調べます。GitHub・GitLab・Zulip のトークンを .env に書くか、MCPサーバーを画面から足します"),
+  );
+  const open = iconButton("plug", "ソースと接続を開く", "primary");
+  open.addEventListener("click", () => document.getElementById("open-status").click());
+  box.replaceChildren(el("div", "setup-head", "はじめに：お試しで動いています"), list, open);
 }
 
 // LLMの送り先。秘密の情報を入れてよいか判断できるよう、手元のネットワークの中か外かを出す
@@ -1153,14 +1217,16 @@ function renderFolders() {
     row.classList.toggle("active", id === viewFolderId);
     const open = el("button", "folder-open");
     open.type = "button";
-    open.append(el("span", "folder-name", name));
+    open.append(icon(id ? "folder" : "inbox"), el("span", "folder-name", name));
     if (count !== undefined) open.append(el("span", "folder-count", String(count)));
     open.addEventListener("click", () => startNew(id));
     row.append(open);
     if (id) {
-      const settings = el("button", "folder-settings", "設定");
+      const settings = el("button", "folder-settings");
       settings.type = "button";
-      settings.title = `「${name}」の名前・メモ・削除`;
+      settings.append(icon("more"));
+      settings.title = `「${name}」の名前・削除`;
+      settings.setAttribute("aria-label", settings.title);
       settings.addEventListener("click", () => openFolderDialog(id));
       row.append(settings);
     }
@@ -1228,15 +1294,16 @@ document.getElementById("delete-folder").addEventListener("click", async () => {
 });
 
 // 開いている調査を別のフォルダへ移す
-moveSelect.addEventListener("change", async () => {
+async function moveTo(folderId) {
   const c = currentConversation();
-  const folderId = moveSelect.value || null;
+  closeMenu();
+  if ((c.folder_id ?? null) === folderId) return;
   await api("PATCH", `/api/conversations/${c.id}`, { folder_id: folderId });
   c.folder_id = folderId;
   await Promise.all([refreshFolders(), refreshList()]);
   applySelection();
   renderHead();
-});
+}
 crumb.addEventListener("click", () => startNew(activeFolderId()));
 
 // ---- メモ（全体と、今のフォルダ） ----
@@ -1293,18 +1360,25 @@ function renderHead(draft) {
   titleEl.textContent = c?.title ?? draft?.title ?? "新しい調査";
   titleEl.classList.toggle("editable", Boolean(c));
   titleEl.title = c ? "クリックして名前を変える" : "";
-  archiveButton.hidden = !c;
-  document.getElementById("export").hidden = !c;
-  archiveButton.textContent = c?.archived ? "アーカイブから戻す" : "アーカイブ";
+  menuButton.hidden = !c;
+  if (!c) closeMenu();
+  setLabel(archiveButton, c?.archived ? "アーカイブから戻す" : "アーカイブ");
   const folder = activeFolder();
   crumb.hidden = !folder;
-  crumb.textContent = folder ? `${folder.name} ›` : "";
+  crumb.replaceChildren(...(folder ? [icon("folder"), folder.name] : []));
   crumb.title = folder ? `フォルダ「${folder.name}」で新しい調査を始める` : "";
-  document.getElementById("move").hidden = !c;
   if (c) {
-    const none = Object.assign(el("option", "", "なし"), { value: "" });
-    moveSelect.replaceChildren(none, ...folders.map((f) => Object.assign(el("option", "", f.name), { value: f.id })));
-    moveSelect.value = c.folder_id ?? "";
+    // フォルダへ移すメニュー。今のフォルダには印を付ける
+    const item = (id, name, iconName) => {
+      const button = el("button", (c.folder_id ?? null) === id ? "current" : "");
+      button.type = "button";
+      button.setAttribute("role", "menuitemradio");
+      button.setAttribute("aria-checked", String((c.folder_id ?? null) === id));
+      button.append(icon((c.folder_id ?? null) === id ? "check" : iconName), name);
+      button.addEventListener("click", () => moveTo(id));
+      return button;
+    };
+    moveSelect.replaceChildren(item(null, "フォルダの外", "inbox"), ...folders.map((f) => item(f.id, f.name, "folder")));
   }
 }
 
@@ -1312,6 +1386,7 @@ function renderHead(draft) {
 
 // 開いている調査を、質問・回答・出典のMarkdownにしてファイルに保存する
 document.getElementById("export").addEventListener("click", async () => {
+  closeMenu();
   const c = currentConversation();
   if (!c) return;
   const { turns } = await api("GET", `/api/conversations/${c.id}`);
@@ -1345,10 +1420,23 @@ function fileName(title) {
   return title.replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 60) || "調査";
 }
 
+// ---- 使い方 ----
+
+const helpDialog = document.getElementById("help");
+document.getElementById("open-help").addEventListener("click", () => helpDialog.showModal());
+helpDialog.querySelector("[data-close]").addEventListener("click", () => helpDialog.close());
+
 // ---- キーボード ----
 
 document.addEventListener("keydown", (e) => {
   const mod = e.ctrlKey || e.metaKey;
+  // 文字を打っている最中でなければ、? で使い方を開く
+  const typing = e.target.closest("input, textarea, select, [contenteditable]");
+  if (e.key === "?" && !typing && !mod && !document.querySelector("dialog[open]")) {
+    e.preventDefault();
+    helpDialog.showModal();
+    return;
+  }
   if (mod && !e.shiftKey && e.key.toLowerCase() === "k") {
     e.preventDefault();
     search.focus();
@@ -1557,7 +1645,7 @@ function clarifyView({ agent, content }, index) {
   const { node, body, meta } = answerFrame(agent);
   meta.replaceChildren(el("span", "pill followup", "確認"));
   const note = el("div", "clarify-note", "答えを下の入力欄に書いてください。");
-  const skip = el("button", "", "聞き返さずに調べる");
+  const skip = iconButton("search", "聞き返さずに調べる");
   skip.type = "button";
   skip.title = "今の質問のまま、所員に調べさせます";
   skip.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index, true));
@@ -1573,13 +1661,13 @@ function chatView({ agent, content, model, seconds, llm_calls, trace_id }, index
   meta.replaceChildren(el("span", "pill unset", "相談（調べていません）"), " ", [model, seconds !== undefined && formatSeconds(seconds)].filter(Boolean).join(" · "));
   const actions = el("div", "answer-actions");
   actions.append(copyButton(content));
-  const regenerate = el("button", "", "作り直す");
+  const regenerate = iconButton("redo", "作り直す");
   regenerate.type = "button";
   regenerate.title = "同じ頼みでもう一度答えてもらう（今選んでいる調べる場所で）";
   regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index));
   actions.append(regenerate);
   if (trace_id) {
-    const button = el("button", "", `LLMとのやりとり（${llm_calls}回）`);
+    const button = iconButton("list", `LLMとのやりとり（${llm_calls}回）`, "subtle");
     button.type = "button";
     button.addEventListener("click", () => openTrace(trace_id));
     actions.append(button);
@@ -1609,18 +1697,18 @@ function answerView(turn, index) {
   const answer = markdownView(content);
   const actions = el("div", "answer-actions");
   actions.append(copyButton(content));
-  const regenerate = el("button", "", "作り直す");
+  const regenerate = iconButton("redo", "作り直す");
   regenerate.type = "button";
   regenerate.title = "同じ質問でもう一度調べる";
   regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").question, index));
   actions.append(regenerate);
-  const followup = el("button", "followup-ask", "その後どうなった？");
+  const followup = iconButton("clock", "その後どうなった？", "followup-ask");
   followup.type = "button";
   followup.title = turn.date ? `${turn.date} 以降の動きだけを調べる` : "この回答の日以降の動きだけを調べる";
   followup.addEventListener("click", askFollowup);
   actions.append(followup);
   if (trace_id) {
-    const button = el("button", "", `LLMとのやりとり（${llm_calls}回）`);
+    const button = iconButton("list", `LLMとのやりとり（${llm_calls}回）`, "subtle");
     button.type = "button";
     button.addEventListener("click", () => openTrace(trace_id));
     actions.append(button);
@@ -1685,17 +1773,22 @@ function citations(answer, links) {
   const summary = el("summary", "", `出典 ${links.length}件`);
   if (missing) summary.append(el("span", "pill failed", `${missing}件は検索結果にありません`));
   const list = el("ol", "citation-list");
-  for (const link of links) {
+  links.forEach((link, i) => {
     const item = el("li", link.found ? "" : "unverified");
-    const a = el("a", "", link.title || link.url);
+    const a = el("a", "citation-card");
     a.href = link.url;
     a.target = "_blank";
     a.rel = "noopener noreferrer";
-    const meta = link.found ? [link.source, link.date].filter(Boolean).join(" · ") : "検索結果にありません（LLMが作ったURLかもしれません）";
-    item.append(a, el("span", "citation-meta", meta));
-    if (link.title) item.append(el("span", "citation-url", link.url));
+    a.title = link.url;
+    let host = link.url;
+    try {
+      host = new URL(link.url).host;
+    } catch {}
+    const meta = link.found ? [link.source, link.date, host].filter(Boolean).join(" · ") : `検索結果にありません（LLMが作ったURLかもしれません） · ${host}`;
+    a.append(el("span", "citation-number", String(i + 1)), el("span", "citation-title", link.title || link.url), el("span", "citation-meta", meta));
+    item.append(a);
     list.append(item);
-  }
+  });
   box.append(summary, list);
   return box;
 }
@@ -1721,7 +1814,9 @@ function progressView(startedAt = Date.now() / 1000, consult = false) {
   record.hidden = true; // 所員が動き出してから出す
   const members = membersView([]);
   record.append(el("summary", "", "調査の様子"), members);
-  body.append(answer, record);
+  // 待っている間にできることを知らせる（調査は裏で続き、終わったら知らせる）
+  const hint = el("p", "progress-hint", "終わったらお知らせします。待つ間に、ほかの調査を開いたり新しく頼んだりできます。");
+  body.append(answer, record, hint);
 
   // ソースごとの今の行。再調査が始まると、その所員の行は再調査の行に切り替わる
   const rows = new Map();
@@ -1903,18 +1998,26 @@ function messageView(m) {
   return node;
 }
 
+// アイコンつきのボタン
+function iconButton(name, text, className = "") {
+  const button = el("button", className);
+  button.type = "button";
+  button.append(icon(name), text);
+  return button;
+}
+
 function copyButton(text) {
-  const button = el("button", "", "コピー");
+  const button = iconButton("copy", "コピー");
   button.type = "button";
   button.title = "回答をMarkdownのままコピー";
   button.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(text);
-      button.textContent = "コピーしました";
+      setLabel(button, "コピーしました");
     } catch {
-      button.textContent = "コピーできませんでした";
+      setLabel(button, "コピーできませんでした");
     }
-    setTimeout(() => (button.textContent = "コピー"), 1500);
+    setTimeout(() => setLabel(button, "コピー"), 1500);
   });
   return button;
 }
@@ -2014,8 +2117,12 @@ function showEmpty() {
     : "所員が選んだ場所を手分けして調べ、所長が経緯を根拠のリンクつきでまとめます。";
   const destination = el("p", "destination-note", destinationNote);
   destination.id = "destination-note";
-  node.append(logo, el("h2", "", heading), el("p", "", note), examples, destination);
+  const setup = el("section", "setup");
+  setup.id = "setup";
+  setup.hidden = true;
+  node.append(logo, el("h2", "", heading), el("p", "", note), examples, setup, destination);
   log.replaceChildren(node);
+  renderSetup();
 }
 
 function autosize() {
