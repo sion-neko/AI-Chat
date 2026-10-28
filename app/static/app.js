@@ -1787,6 +1787,7 @@ document.getElementById("run-check").addEventListener("click", async (e) => {
   }
 });
 
+// 接続確認の表。results（確認の結果）がなければ、設定の有無だけ出す
 function renderStatus(status, results) {
   const STATES = { ok: ["done", "OK"], error: ["failed", "エラー"], unset: ["unset", "未設定"] };
   const row = (name, result) => {
@@ -1805,7 +1806,6 @@ function renderStatus(status, results) {
   document.getElementById("status-table").replaceChildren(...rows);
 }
 
-// results（確認の結果）がなければ、設定の有無だけ出す
 const mcpForm = document.getElementById("mcp-form");
 // 編集しているサーバーのキー（null なら足す）
 let mcpEditing = null;
@@ -1949,12 +1949,12 @@ function characterForm(c) {
   const name = el("input");
   name.id = `character-name-${c.key}`;
   name.value = c.name;
-  name.maxLength = 20;
+  name.maxLength = 20; // サーバーの上限（characters.NAME_LENGTH）と同じ
   name.required = true;
   const persona = el("textarea");
   persona.id = `character-persona-${c.key}`;
   persona.value = c.persona;
-  persona.maxLength = 300;
+  persona.maxLength = 300; // サーバーの上限（characters.PERSONA_LENGTH）と同じ
   persona.rows = 2;
   const status = el("span", "character-status");
   const reset = el("button", "quiet", "既定に戻す");
@@ -2123,6 +2123,13 @@ function el(tag, className, text) {
   return node;
 }
 
+// 調査の欄を一番下まで見ているか。上の方を読んでいる間は、届いた分で下へ送らない
+let followBottom = true;
+
+log.addEventListener("scroll", () => {
+  followBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+});
+
 // 自分で足したもの（質問など）は、読んでいた位置にかかわらず見せる
 function append(node) {
   log.append(node);
@@ -2135,12 +2142,6 @@ function append(node) {
 function scrollToBottom() {
   if (followBottom) log.scrollTop = log.scrollHeight;
 }
-
-let followBottom = true;
-
-log.addEventListener("scroll", () => {
-  followBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
-});
 
 function autosize() {
   input.style.height = "auto";
@@ -2157,9 +2158,6 @@ for (const button of document.querySelectorAll("dialog [data-close]")) {
 // すべての宣言がすんでから動かすため、ファイルの最後に置く
 // ソースの一覧と、フォルダの外での選択がそろってから入力欄を描く
 Promise.all([loadConfig(), refreshFolders()]).then(() => applySelection());
-
 refreshList();
-
 showEmpty();
-
 connectEvents();
