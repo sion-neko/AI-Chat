@@ -34,6 +34,7 @@
       <button id="open-status" class="side-link" type="button" title="LLMとソースの接続確認、MCPサーバーの設定" data-icon="plug">ソースと接続</button>
       <button id="open-characters" class="side-link" type="button" title="所長と所員の名前と性格" data-icon="users">キャラクター</button>
       <button id="toggle-archive" class="side-link" type="button" data-icon="archive">アーカイブ</button>
+      <button id="open-help" class="side-link" type="button" title="使い方とショートカット（?）" data-icon="help">使い方</button>
     </div>
   </aside>
 
@@ -194,6 +195,45 @@
     </div>
     <p id="trace-summary" class="dialog-note"></p>
     <div id="trace-list" class="calls"></div>
+  </dialog>
+
+  <dialog id="help" class="wide">
+    <div class="dialog-head">
+      <h2>使い方</h2>
+      <button class="close" type="button" title="閉じる" data-close>×</button>
+    </div>
+    <div class="help-grid">
+      <section>
+        <h3>聞く</h3>
+        <p>「あの話どうなった？」のように、ふだんの言葉で聞きます。入力欄の下の「調べる場所」で選んだ場所を、所員が手分けして調べ、所長が根拠のリンクつきでまとめます。</p>
+        <p>何の話か分からないときは、所長が先に聞き返します。</p>
+      </section>
+      <section>
+        <h3>調べずに頼む</h3>
+        <p>「調べる場所」を全部外すと、所長がそのまま答えます。貼った文章の要約や下書きに使えます。ログや設定のファイルは「ファイルを添える」やドラッグで貼れます。</p>
+      </section>
+      <section>
+        <h3>待っている間</h3>
+        <p>調査は裏で続くので、ほかの調査を開いたり新しく頼んだりできます。回答が届くと、一覧の点と右上の知らせで分かります。</p>
+      </section>
+      <section>
+        <h3>続きを追う</h3>
+        <p>回答の下の「その後どうなった？」で、前回より後の動きだけを調べます。「作り直す」や質問の「編集」で、調べ直すこともできます。</p>
+      </section>
+      <section>
+        <h3>案件ごとにまとめる</h3>
+        <p>フォルダに調査をまとめると、調べる場所の選び方をフォルダごとに覚えます。メモに社内での呼び方などを書いておくと、所長と所員が読みます。</p>
+      </section>
+      <section>
+        <h3>ショートカット</h3>
+        <dl class="shortcuts">
+          <dt><kbd>Enter</kbd></dt><dd>送る（<kbd>Shift</kbd>+<kbd>Enter</kbd> で改行）</dd>
+          <dt><kbd>Ctrl</kbd>+<kbd>K</kbd></dt><dd>過去の調査を探す</dd>
+          <dt><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd></dt><dd>新しい調査</dd>
+          <dt><kbd>?</kbd></dt><dd>この使い方</dd>
+        </dl>
+      </section>
+    </div>
   </dialog>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>

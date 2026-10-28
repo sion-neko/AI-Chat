@@ -1182,12 +1182,14 @@ kbd {
 }
 
 /* サイドバーの下：全体の設定 */
-.sidebar-foot { display: flex; flex-direction: column; gap: 1px; padding-top: 8px; border-top: 1px solid var(--line); }
+/* 一覧の場所を広く取れるよう、2列に並べる */
+.sidebar-foot { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 4px; padding-top: 8px; border-top: 1px solid var(--line); }
 
 .side-link {
   justify-content: flex-start;
   width: 100%;
-  padding: 5px 10px;
+  padding: 5px 8px;
+  white-space: nowrap;
   border: none;
   background: none;
   color: var(--muted);
@@ -1270,3 +1272,16 @@ kbd {
 .setup-steps li.done b { color: var(--muted); font-weight: normal; text-decoration: line-through; }
 
 .progress-hint { margin: 10px 0 0; font-size: var(--text-xs); color: var(--muted); }
+
+/* 使い方 */
+.help-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 4px 24px; }
+
+.help-grid h3 { margin: 12px 0 4px; font-size: var(--text-sm); }
+
+.help-grid p { margin: 0 0 6px; font-size: var(--text-sm); color: var(--muted); line-height: 1.7; }
+
+.shortcuts { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 4px 0 0; font-size: var(--text-sm); }
+
+.shortcuts dt { white-space: nowrap; }
+
+.shortcuts dd { margin: 0; color: var(--muted); }

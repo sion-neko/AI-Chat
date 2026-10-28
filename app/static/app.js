@@ -1420,10 +1420,23 @@ function fileName(title) {
   return title.replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 60) || "調査";
 }
 
+// ---- 使い方 ----
+
+const helpDialog = document.getElementById("help");
+document.getElementById("open-help").addEventListener("click", () => helpDialog.showModal());
+helpDialog.querySelector("[data-close]").addEventListener("click", () => helpDialog.close());
+
 // ---- キーボード ----
 
 document.addEventListener("keydown", (e) => {
   const mod = e.ctrlKey || e.metaKey;
+  // 文字を打っている最中でなければ、? で使い方を開く
+  const typing = e.target.closest("input, textarea, select, [contenteditable]");
+  if (e.key === "?" && !typing && !mod && !document.querySelector("dialog[open]")) {
+    e.preventDefault();
+    helpDialog.showModal();
+    return;
+  }
   if (mod && !e.shiftKey && e.key.toLowerCase() === "k") {
     e.preventDefault();
     search.focus();
