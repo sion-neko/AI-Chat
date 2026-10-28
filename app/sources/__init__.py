@@ -3,9 +3,11 @@
 from app.sources import dummy, github, gitlab, mcp_servers, zulip
 from app.sources.base import Source
 
-__all__ = ["Source", "SourceError", "all_sources", "check", "describe", "resolve", "resolve_scopes", "scope_choices", "status"]
+__all__ = ["Source", "SourceError", "all_sources", "check", "demo_mode", "describe", "resolve", "resolve_scopes", "scope_choices", "status", "usable"]
 
 BUILTIN: list[Source] = [dummy.CHAT, dummy.WIKI, github.GITHUB, gitlab.GITLAB, zulip.ZULIP]
+# お試し用のサンプルソース。本物のソースを1つでも設定したら使わない（架空の話が回答に混ざらないように）
+SAMPLES = {dummy.CHAT.id, dummy.WIKI.id}
 mcp_servers.load()
 
 
@@ -14,20 +16,33 @@ def all_sources() -> list[Source]:
     return [*BUILTIN, *mcp_servers.sources()]
 
 
+def demo_mode() -> bool:
+    """本物のソースが1つも使えない（サンプルだけで動いている）か。"""
+    return not any(s.configured for s in all_sources() if s.id not in SAMPLES)
+
+
+def usable() -> list[Source]:
+    """今使えるソース。サンプルは、本物のソースが1つもないときだけ。"""
+    demo = demo_mode()
+    return [s for s in all_sources() if s.configured and (demo or s.id not in SAMPLES)]
+
+
 class SourceError(Exception):
     """ソースの指定が不正、または今の設定では使えない。"""
 
 
 def describe() -> list[dict]:
     """画面に出すソースの一覧。設定がそろっていないソースは出さない。scope_label は範囲を選べるソースだけ。"""
-    return [{"id": s.id, "label": s.label, "scope_label": s.scope_label if s.scopes else ""} for s in all_sources() if s.configured]
+    return [{"id": s.id, "label": s.label, "scope_label": s.scope_label if s.scopes else ""} for s in usable()]
 
 
 def status() -> list[dict]:
     """接続確認の画面に出す一覧。設定されていないソースも、必要な設定と一緒に出す。"""
+    demo = demo_mode()
     return [
         {"id": s.id, "label": s.label, "configured": s.configured, "requires": s.requires, "mcp": s.id.startswith("mcp_")}
         for s in all_sources()
+        if demo or s.id not in SAMPLES
     ]
 
 
@@ -65,11 +80,11 @@ def resolve_scopes(selected: list[Source], scopes: dict) -> dict[str, list[str]]
 
 def resolve(source_ids: list[str]) -> list[Source]:
     """指定されたソースを返す。使えないソースが含まれていたら SourceError。空なら空（調べずに所長に相談する）。"""
-    by_id = {s.id: s for s in all_sources()}
+    by_id = {s.id: s for s in usable()}
     selected = []
     for source_id in dict.fromkeys(source_ids):  # 重複を除く
         source = by_id.get(source_id)
-        if source is None or not source.configured:
+        if source is None:
             raise SourceError(f"使えないソースです: {source_id}")
         selected.append(source)
     return selected

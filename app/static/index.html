@@ -15,17 +15,26 @@
         <div class="brand-sub">横断調査AIチャット</div>
       </div>
     </div>
-    <button id="new-chat" class="new-chat" type="button" title="Ctrl+Shift+O">新しい調査</button>
-    <input id="search" class="search" type="search" placeholder="過去の調査を探す（Ctrl+K）" title="タイトルと中身（質問・回答・調査の記録）から探します。空白で区切るとAND">
+    <button id="new-chat" class="new-chat" type="button" title="Ctrl+Shift+O" data-icon="plus">新しい調査</button>
+    <label class="search-box" title="タイトルと中身（質問・回答・調査の記録）から探します。空白で区切るとAND">
+      <span data-icon="search"></span>
+      <input id="search" class="search" type="search" placeholder="過去の調査を探す" aria-label="過去の調査を探す">
+      <kbd>Ctrl K</kbd>
+    </label>
     <section class="folders">
       <div class="section-head">
         <span>フォルダ</span>
-        <button id="new-folder" class="quiet" type="button" title="フォルダを作る">＋ 作る</button>
+        <button id="new-folder" class="quiet icon-button" type="button" title="フォルダを作る（案件ごとに調査をまとめる）" aria-label="フォルダを作る" data-icon="plus"></button>
       </div>
       <div id="folder-list" class="folder-list"></div>
     </section>
-    <nav id="conversations" class="conversations"></nav>
-    <button id="toggle-archive" class="quiet archive-toggle" type="button">アーカイブを見る</button>
+    <nav id="conversations" class="conversations" aria-label="調査の一覧"></nav>
+    <div class="sidebar-foot">
+      <button id="open-memo" class="side-link" type="button" title="所長と所員が調べるときに読むメモ" data-icon="note">メモ</button>
+      <button id="open-status" class="side-link" type="button" title="LLMとソースの接続確認、MCPサーバーの設定" data-icon="plug">ソースと接続</button>
+      <button id="open-characters" class="side-link" type="button" title="所長と所員の名前と性格" data-icon="users">キャラクター</button>
+      <button id="toggle-archive" class="side-link" type="button" data-icon="archive">アーカイブ</button>
+    </div>
   </aside>
 
   <div class="main">
@@ -34,16 +43,19 @@
         <button id="folder-crumb" class="crumb" type="button" hidden></button>
         <h1 id="conversation-title" class="conversation-title">新しい調査</h1>
       </div>
-      <label id="move" class="move" hidden>
-        <span>フォルダ</span>
-        <select id="move-folder"></select>
-      </label>
-      <button id="export" class="quiet" type="button" title="質問と回答をMarkdownのファイルに保存する（報告やメモに貼るとき）" hidden>書き出す</button>
-      <button id="archive" class="quiet" type="button" hidden>アーカイブ</button>
       <span id="model" class="model" title="設定中のモデル">…</span>
-      <button id="open-memo" class="quiet" type="button">メモ</button>
-      <button id="open-status" class="quiet" type="button" title="接続確認とMCPサーバーの設定">ソース</button>
-      <button id="open-characters" class="quiet" type="button">キャラクター</button>
+      <div class="menu-wrap">
+        <button id="conv-menu-button" class="quiet icon-button" type="button" title="この調査の操作" aria-label="この調査の操作" aria-haspopup="menu" aria-expanded="false" data-icon="more" hidden></button>
+        <div id="conv-menu" class="menu" role="menu" hidden>
+          <button id="rename" type="button" role="menuitem" data-icon="edit">名前を変える</button>
+          <button id="export" type="button" role="menuitem" title="質問と回答をMarkdownのファイルに保存する（報告やメモに貼るとき）" data-icon="download">Markdownで書き出す</button>
+          <div class="menu-label">フォルダへ移す</div>
+          <div id="move-folder" class="menu-folders"></div>
+          <hr>
+          <button id="archive" type="button" role="menuitem" data-icon="archive">アーカイブ</button>
+          <button id="delete-conversation" class="danger" type="button" role="menuitem" data-icon="trash">削除</button>
+        </div>
+      </div>
     </header>
 
     <main id="log" class="log"></main>
@@ -56,7 +68,7 @@
         <div id="sources" class="sources"></div>
         <span id="consult-hint" class="consult-hint" title="調べる場所を選ばないと、所員は動かず、所長がそのまま答えます。貼った文章の要約・言い換え・下書きなどに" hidden>調べずに所長が答えます</span>
         <span id="composer-status" class="composer-status"></span>
-        <button id="attach" class="quiet attach" type="button" title="ログや設定のファイル（中身を入力欄に貼ります）や、画像を読めるモデルならスクリーンショットを添える。ドラッグでも添えられます">ファイルを添える</button>
+        <button id="attach" class="quiet attach" type="button" data-icon="clip" title="ログや設定のファイル（中身を入力欄に貼ります）や、画像を読めるモデルならスクリーンショットを添える。ドラッグでも添えられます">ファイルを添える</button>
         <input id="attach-file" type="file" multiple hidden>
         <button id="send" class="send" type="submit">調査を依頼</button>
       </div>
@@ -111,7 +123,7 @@
 
   <dialog id="status" class="wide">
     <div class="dialog-head">
-      <h2>ソース</h2>
+      <h2>ソースと接続</h2>
       <button id="close-status" class="close" type="button" title="閉じる">×</button>
     </div>
 
@@ -186,6 +198,7 @@
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
+  <script src="/static/icons.js"></script>
   <script src="/static/markdown.js"></script>
   <script src="/static/app.js"></script>
 </body>

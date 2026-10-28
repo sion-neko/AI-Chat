@@ -241,6 +241,8 @@ def config() -> dict:
         # 今のモデルが画像を読めるか（app/models.json）。読めるときだけ画面で画像を添えられる
         "vision": models.vision(),
         "director": characters.director().name,
+        # 本物のソースが1つもなく、サンプルで動いている（画面で「はじめに」を出す）
+        "demo": sources.demo_mode(),
         "sources": [{**s, "agent": characters.member(s["id"], s["label"]).name} for s in sources.describe()],
     }
 
@@ -264,7 +266,7 @@ def status() -> dict:
 
 def check() -> dict:
     """LLMとソースの接続確認を並列に行う。"""
-    all_sources = sources.all_sources()
+    all_sources = [s for s in sources.all_sources() if sources.demo_mode() or s.id not in sources.SAMPLES]
     with ThreadPoolExecutor() as pool:
         llm = pool.submit(agent.check_llm)
         results = dict(zip((s.id for s in all_sources), pool.map(sources.check, all_sources)))
