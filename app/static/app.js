@@ -1,10 +1,22 @@
+// おばけ探偵事務所の画面（標準のJavaScriptだけ。組み立ての手順なし）
+//
+// 節の並び:
+//   状態とよく使う要素 / 質問して調べる / 進み具合のストリーム / 回答が届いたときの知らせ / 質問に添えるファイル
+//   設定と調べる場所 / 調べる範囲を選ぶ / 調査の一覧 / フォルダ / 開いている調査の見出しと操作 / 調査と回答の表示
+//   最初の画面 / メモ / ソースと接続 / キャラクター / LLMとのやりとり / 使い方 / キーボード / 通信と小物 / 起動
+//
+// 調査はサーバーで走り、進み具合は /api/events の1本のストリームで届く（app/jobs.py）。
+// 画面は「調査中のターン」（jobs）を持ち、開いている会話のものだけを描く。
+
+// ---- 状態とよく使う要素 ----
+
 // 表示中の会話ID。null は「新しい会話」（最初の送信でサーバー側に作られる）
 let currentId = null;
 // 会話の一覧（今の検索とアーカイブの表示に合うもの）
 let conversations = [];
 // アーカイブした会話を見ているか
 let showingArchive = false;
-// 開いている会話。検索で一覧から外れても、名前やタグを出せるように持っておく
+// 開いている会話。検索で一覧から外れても、名前やフォルダを出せるように持っておく
 let openedConversation = null;
 // 開いている会話に保存されているターンの数（次の質問の位置）
 let turnCount = 0;
@@ -17,118 +29,20 @@ let selection = { unchecked: [], scopes: {} };
 let directorName = "所長";
 let sourceLabels = new Map();
 
+// よく使う要素
 const log = document.getElementById("log");
 const list = document.getElementById("conversations");
 const search = document.getElementById("search");
 const titleEl = document.getElementById("conversation-title");
-const archiveButton = document.getElementById("archive");
 const form = document.getElementById("form");
 const input = document.getElementById("input");
 const send = document.getElementById("send");
 const sourceBox = document.getElementById("sources");
-const characterDialog = document.getElementById("characters");
-const statusDialog = document.getElementById("status");
-const traceDialog = document.getElementById("trace");
 
-// 最初の画面に出す質問の例
-const EXAMPLES = [
-  "監視サーバーのディスク増設ってどうなった？",
-  "VPN証明書の更新手順ってどこかにまとまってる？",
-  "先月あった障害対応の経緯を教えて",
-];
-
-document.getElementById("new-chat").addEventListener("click", () => startNew(viewFolderId));
-
-// 打つたびにサーバーで探す（中身まで探すので、打ち終わるのを少し待つ）
-let searchTimer = null;
-search.addEventListener("input", () => {
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(refreshList, 250);
-});
-document.getElementById("toggle-archive").addEventListener("click", (e) => {
-  showingArchive = !showingArchive;
-  setLabel(e.currentTarget, showingArchive ? "一覧に戻る" : "アーカイブ");
-  e.currentTarget.classList.toggle("active", showingArchive);
-  document.querySelector(".sidebar").classList.toggle("archive-mode", showingArchive);
-  refreshList();
-});
-archiveButton.addEventListener("click", async () => {
-  const c = currentConversation();
-  closeMenu();
-  await api("PATCH", `/api/conversations/${c.id}`, { archived: !c.archived });
-  c.archived = !c.archived;
-  renderHead();
-  await refreshList();
-});
-titleEl.addEventListener("click", renameConversation);
-
-// ---- この調査の操作（⋯のメニュー） ----
-
-const menuButton = document.getElementById("conv-menu-button");
-const menu = document.getElementById("conv-menu");
-
-function closeMenu() {
-  menu.hidden = true;
-  menuButton.setAttribute("aria-expanded", "false");
-}
-
-menuButton.addEventListener("click", (e) => {
-  e.stopPropagation();
-  menu.hidden = !menu.hidden;
-  menuButton.setAttribute("aria-expanded", String(!menu.hidden));
-  if (!menu.hidden) menu.querySelector("button")?.focus();
-});
-document.addEventListener("click", (e) => !menu.hidden && !menu.contains(e.target) && closeMenu());
-document.addEventListener("keydown", (e) => e.key === "Escape" && !menu.hidden && (closeMenu(), menuButton.focus()));
-document.getElementById("rename").addEventListener("click", () => {
-  closeMenu();
-  renameConversation();
-});
-document.getElementById("delete-conversation").addEventListener("click", () => {
-  closeMenu();
-  deleteConversation(currentId);
-});
-
-// ボタンの文字だけを変える（アイコンは残す）
-function setLabel(button, text) {
-  button.replaceChildren(...button.querySelectorAll("svg"), text);
-}
-sourceBox.addEventListener("change", () => {
-  selection.unchecked = [...sourceBox.querySelectorAll("input:not(:checked)")].map((box) => box.value);
-  saveSelection();
-  setSendButton();
-});
-
-document.getElementById("open-characters").addEventListener("click", async () => {
-  renderCharacters(await api("GET", "/api/characters"));
-  characterDialog.showModal();
-});
-document.getElementById("close-characters").addEventListener("click", () => characterDialog.close());
-// 名前が変わったらソースの表示（所員の名前）も変わる
-characterDialog.addEventListener("close", loadConfig);
-
-document.getElementById("open-status").addEventListener("click", async () => {
-  const [status, mcp] = await Promise.all([api("GET", "/api/status"), api("GET", "/api/mcp")]);
-  renderStatus(status);
-  renderMcp(mcp);
-  closeMcpForm();
-  statusDialog.showModal();
-});
-document.getElementById("close-status").addEventListener("click", () => statusDialog.close());
-document.getElementById("close-trace").addEventListener("click", () => traceDialog.close());
-document.getElementById("run-check").addEventListener("click", async (e) => {
-  const button = e.currentTarget;
-  button.disabled = true;
-  button.textContent = "確認中…";
-  try {
-    renderStatus(await api("GET", "/api/status"), await api("POST", "/api/check"));
-  } finally {
-    button.disabled = false;
-    button.textContent = "確認する";
-  }
-});
+// ---- 質問して調べる ----
 
 input.addEventListener("input", autosize);
+
 input.addEventListener("keydown", (e) => {
   // 日本語変換の確定Enterでは送信しない
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -144,6 +58,7 @@ input.addEventListener("keydown", (e) => {
 // view と turnNode は、その会話を開いている間だけの進み具合の表示。mine はこの画面から送った質問と画像
 // 調査はサーバーで最後まで走るので、別の会話を開いても、画面をリロードしても続く
 const jobs = new Map();
+
 // 質問を送っている途中（サーバーが受け付けるまで）。二重に送らないようにする
 let submitting = false;
 
@@ -293,6 +208,17 @@ function setSendButton() {
   send.textContent = job ? (job.cancelling ? "中止しています…" : "中止") : submitting ? "受け付けています…" : idle;
   send.classList.toggle("stop", Boolean(job));
   send.disabled = Boolean(job?.cancelling) || (submitting && !job);
+}
+
+// 聞き直せるよう、質問と添えた画像を入力欄に戻す（入力中の文章や画像があれば上書きしない）
+function restoreQuestion(content, images = []) {
+  if (!attachments.length && images.length) {
+    attachments = images;
+    renderAttachments();
+  }
+  if (input.value.trim()) return;
+  input.value = content;
+  autosize();
 }
 
 // ---- 進み具合のストリーム ----
@@ -513,24 +439,7 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden && currentId && (arrivals.has(currentId) || currentConversation()?.unread)) markRead(currentId);
 });
 
-let listTimer = null;
-function refreshListSoon() {
-  clearTimeout(listTimer);
-  listTimer = setTimeout(refreshList, 200);
-}
-
-// 聞き直せるよう、質問と添えた画像を入力欄に戻す（入力中の文章や画像があれば上書きしない）
-function restoreQuestion(content, images = []) {
-  if (!attachments.length && images.length) {
-    attachments = images;
-    renderAttachments();
-  }
-  if (input.value.trim()) return;
-  input.value = content;
-  autosize();
-}
-
-// ---- 質問に添える画像 ----
+// ---- 質問に添えるファイル ----
 
 const IMAGE_COUNT = 4; // サーバーの上限（web.IMAGE_COUNT）と同じ
 const IMAGE_SIDE = 1600; // これより大きい画像は縮めて送る（LLMの負荷を減らす）
@@ -630,22 +539,27 @@ function renderAttachments() {
 }
 
 attachButton.addEventListener("click", () => attachFile.click());
+
 attachFile.addEventListener("change", () => {
   addFiles(attachFile.files);
   attachFile.value = "";
 });
+
 input.addEventListener("paste", (e) => {
   const files = [...e.clipboardData.files].filter((f) => f.type.startsWith("image/"));
   if (!files.length) return;
   e.preventDefault();
   addImages(files);
 });
+
 form.addEventListener("dragover", (e) => {
   if (![...e.dataTransfer.types].includes("Files")) return;
   e.preventDefault();
   form.classList.add("dragging");
 });
+
 form.addEventListener("dragleave", () => form.classList.remove("dragging"));
+
 form.addEventListener("drop", (e) => {
   form.classList.remove("dragging");
   if (!e.dataTransfer.files.length) return;
@@ -653,7 +567,7 @@ form.addEventListener("drop", (e) => {
   addFiles(e.dataTransfer.files);
 });
 
-// ---- 設定とソース ----
+// ---- 設定と調べる場所 ----
 
 // 使えるソースの一覧（入力欄を描き直すときに使う）
 let sourceList = [];
@@ -705,6 +619,7 @@ const DESTINATIONS = {
   external: ["外部", "インターネット上"],
   unknown: ["不明", "送り先のアドレスが分からない場所"],
 };
+
 let destinationNote = "";
 
 function renderDestination({ model, vision, llm_url, destination: d }) {
@@ -787,7 +702,17 @@ function scopeButton(source) {
   return button;
 }
 
-// ---- 検索範囲の選択 ----
+function selectedSources() {
+  return [...sourceBox.querySelectorAll("input:checked")].map((box) => box.value);
+}
+
+sourceBox.addEventListener("change", () => {
+  selection.unchecked = [...sourceBox.querySelectorAll("input:not(:checked)")].map((box) => box.value);
+  saveSelection();
+  setSendButton();
+});
+
+// ---- 調べる範囲を選ぶ ----
 
 const scopeDialog = document.getElementById("scope");
 const scopeList = document.getElementById("scope-list");
@@ -830,11 +755,14 @@ function renderScopeList() {
 }
 
 scopeFilter.addEventListener("input", renderScopeList);
+
 document.getElementById("close-scope").addEventListener("click", () => scopeDialog.close());
+
 document.getElementById("scope-clear").addEventListener("click", () => {
   scopeEditing.checked.clear();
   renderScopeList();
 });
+
 document.getElementById("scope-done").addEventListener("click", () => {
   const { source, button, checked } = scopeEditing;
   if (checked.size) selection.scopes[source.id] = [...checked];
@@ -844,203 +772,25 @@ document.getElementById("scope-done").addEventListener("click", () => {
   scopeDialog.close();
 });
 
-function selectedSources() {
-  return [...sourceBox.querySelectorAll("input:checked")].map((box) => box.value);
-}
+// ---- 調査の一覧 ----
 
-// ---- 接続確認 ----
+document.getElementById("new-chat").addEventListener("click", () => startNew(viewFolderId));
 
-// results（確認の結果）がなければ、設定の有無だけ出す
-// ---- MCPサーバー ----
+// 打つたびにサーバーで探す（中身まで探すので、打ち終わるのを少し待つ）
+let searchTimer = null;
 
-const mcpForm = document.getElementById("mcp-form");
-// 編集しているサーバーのキー（null なら足す）
-let mcpEditing = null;
-
-function renderMcp({ path, servers }) {
-  document.getElementById("mcp-path").textContent = path;
-  const list = document.getElementById("mcp-list");
-  if (!servers.length) {
-    list.replaceChildren(el("div", "conv-empty", "まだありません。「＋ 足す」から足せます。"));
-    return;
-  }
-  list.replaceChildren(
-    ...servers.map((s) => {
-      const item = el("div", "mcp-item");
-      const head = el("div", "mcp-head");
-      head.append(
-        el("b", "", s.label),
-        el("span", s.connected ? "pill done" : "pill failed", s.connected ? "つながっています" : "つながりません"),
-        el("span", "mcp-where", s.url ?? [s.command, ...(s.args ?? [])].join(" ")),
-      );
-      const edit = el("button", "quiet", "編集");
-      edit.type = "button";
-      edit.addEventListener("click", () => openMcpForm(s));
-      const remove = el("button", "quiet danger", "外す");
-      remove.type = "button";
-      remove.addEventListener("click", async () => {
-        if (!confirm(`MCPサーバー「${s.label}」を外しますか？`)) return;
-        renderMcp(await api("DELETE", `/api/mcp/${s.key}`));
-        await refreshSources();
-      });
-      head.append(edit, remove);
-      const detail = s.connected
-        ? el("div", "mcp-detail", `使えるツール: ${s.tools.join(", ") || "なし"}`)
-        : el("div", "mcp-detail error-text", s.error);
-      item.append(head, detail);
-      return item;
-    }),
-  );
-}
-
-// 「名前: 値」「名前=値」の行を読み書きする
-function parseLines(text, separator) {
-  const result = {};
-  for (const line of text.split("\n")) {
-    const at = line.indexOf(separator);
-    if (at > 0) result[line.slice(0, at).trim()] = line.slice(at + 1).trim();
-  }
-  return result;
-}
-
-function formatLines(dict = {}, separator) {
-  return Object.entries(dict)
-    .map(([k, v]) => `${k}${separator}${v}`)
-    .join("\n");
-}
-
-function setMcpKind(kind) {
-  for (const radio of mcpForm.querySelectorAll('[name="mcp-kind"]')) radio.checked = radio.value === kind;
-  document.getElementById("mcp-url-fields").hidden = kind !== "url";
-  document.getElementById("mcp-command-fields").hidden = kind !== "command";
-}
-
-function openMcpForm(server = null) {
-  mcpEditing = server?.key ?? null;
-  document.getElementById("mcp-form-title").textContent = server ? `「${server.label}」を編集` : "MCPサーバーを足す";
-  document.getElementById("mcp-label").value = server?.label ?? "";
-  document.getElementById("mcp-url").value = server?.url ?? "";
-  document.getElementById("mcp-type").value = server?.type ?? "";
-  document.getElementById("mcp-headers").value = formatLines(server?.headers, ": ");
-  document.getElementById("mcp-command").value = server?.command ?? "";
-  document.getElementById("mcp-args").value = (server?.args ?? []).join("\n");
-  document.getElementById("mcp-env").value = formatLines(server?.env, "=");
-  document.getElementById("mcp-status").textContent = "";
-  setMcpKind(server?.command ? "command" : "url");
-  mcpForm.hidden = false;
-  document.getElementById("mcp-label").focus();
-}
-
-function closeMcpForm() {
-  mcpForm.hidden = true;
-}
-
-// ソースが増減したので、入力欄のチップと接続確認の表を描き直す
-async function refreshSources() {
-  await loadConfig();
-  renderStatus(await api("GET", "/api/status"));
-}
-
-document.getElementById("add-mcp").addEventListener("click", () => openMcpForm());
-document.getElementById("mcp-cancel").addEventListener("click", closeMcpForm);
-for (const radio of mcpForm.querySelectorAll('[name="mcp-kind"]')) radio.addEventListener("change", () => setMcpKind(radio.value));
-mcpForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const kind = mcpForm.querySelector('[name="mcp-kind"]:checked').value;
-  const conf = { label: document.getElementById("mcp-label").value };
-  if (kind === "url") {
-    conf.url = document.getElementById("mcp-url").value;
-    conf.type = document.getElementById("mcp-type").value || undefined;
-    conf.headers = parseLines(document.getElementById("mcp-headers").value, ":");
-  } else {
-    conf.command = document.getElementById("mcp-command").value;
-    conf.args = document.getElementById("mcp-args").value.split("\n").map((a) => a.trim()).filter(Boolean);
-    conf.env = parseLines(document.getElementById("mcp-env").value, "=");
-  }
-  const save = document.getElementById("mcp-save");
-  const status = document.getElementById("mcp-status");
-  save.disabled = true;
-  status.textContent = "つないでいます…";
-  try {
-    const result = mcpEditing ? await api("PUT", `/api/mcp/${mcpEditing}`, conf) : await api("POST", "/api/mcp", conf);
-    renderMcp(result);
-    closeMcpForm();
-    await refreshSources();
-  } catch (err) {
-    status.textContent = err.message;
-  } finally {
-    save.disabled = false;
-    if (status.textContent === "つないでいます…") status.textContent = "";
-  }
+search.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(refreshList, 250);
 });
 
-function renderStatus(status, results) {
-  const STATES = { ok: ["done", "OK"], error: ["failed", "エラー"], unset: ["unset", "未設定"] };
-  const row = (name, result) => {
-    const tr = el("tr");
-    const state = el("td");
-    if (result.state) state.append(el("span", `pill ${STATES[result.state][0]}`, STATES[result.state][1]));
-    tr.append(el("th", "", name), state, el("td", "status-message", result.message));
-    return tr;
-  };
-  const rows = [row("LLM", results?.llm ?? { message: `${status.llm.model}（${status.llm.base_url}）` })];
-  for (const s of status.sources) {
-    // MCPサーバーがつながらないのは「未設定」ではなくエラー（下の一覧から直す）
-    const unset = s.mcp ? { state: "error", message: s.requires } : { state: "unset", message: `${s.requires} を .env に書くと使えます` };
-    rows.push(row(s.label, results?.sources[s.id] ?? (s.configured ? { message: "設定済み（まだ確認していません）" } : unset)));
-  }
-  document.getElementById("status-table").replaceChildren(...rows);
-}
-
-// ---- キャラクター ----
-
-function renderCharacters(characters) {
-  document.getElementById("character-list").replaceChildren(...characters.map(characterForm));
-}
-
-function characterForm(c) {
-  const form = el("form", "character");
-  const name = el("input");
-  name.id = `character-name-${c.key}`;
-  name.value = c.name;
-  name.maxLength = 20;
-  name.required = true;
-  const persona = el("textarea");
-  persona.id = `character-persona-${c.key}`;
-  persona.value = c.persona;
-  persona.maxLength = 300;
-  persona.rows = 2;
-  const status = el("span", "character-status");
-  const reset = el("button", "quiet", "既定に戻す");
-  reset.type = "button";
-  const save = el("button", "primary", "保存");
-
-  const run = async (request) => {
-    try {
-      renderCharacters(await request());
-    } catch (err) {
-      status.textContent = err.message;
-    }
-  };
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
-    run(() => api("PUT", `/api/characters/${c.key}`, { name: name.value, persona: persona.value }));
-  });
-  reset.addEventListener("click", () => run(() => api("DELETE", `/api/characters/${c.key}`)));
-
-  const actions = el("div", "dialog-actions");
-  actions.append(status, reset, save);
-  form.append(el("div", "character-role", c.role), labeled("名前", name), labeled("性格", persona), actions);
-  return form;
-}
-
-function labeled(text, control) {
-  const label = el("label", "field");
-  label.append(el("span", "", text), control);
-  return label;
-}
-
-// ---- 会話の一覧 ----
+document.getElementById("toggle-archive").addEventListener("click", (e) => {
+  showingArchive = !showingArchive;
+  setLabel(e.currentTarget, showingArchive ? "一覧に戻る" : "アーカイブ");
+  e.currentTarget.classList.toggle("active", showingArchive);
+  document.querySelector(".sidebar").classList.toggle("archive-mode", showingArchive);
+  refreshList();
+});
 
 function currentConversation() {
   return conversations.find((c) => c.id === currentId) ?? openedConversation;
@@ -1197,12 +947,21 @@ function conversationItem(c) {
   return item;
 }
 
+function highlightCurrent() {
+  for (const item of list.querySelectorAll(".conv")) item.classList.toggle("active", item.dataset.id === currentId);
+}
+
+let listTimer = null;
+
+function refreshListSoon() {
+  clearTimeout(listTimer);
+  listTimer = setTimeout(refreshList, 200);
+}
+
 // ---- フォルダ ----
 
 const folderList = document.getElementById("folder-list");
 const folderDialog = document.getElementById("folder-dialog");
-const crumb = document.getElementById("folder-crumb");
-const moveSelect = document.getElementById("move-folder");
 // 設定を開いているフォルダ
 let editingFolder = null;
 
@@ -1268,6 +1027,7 @@ function openFolderDialog(id) {
 }
 
 document.getElementById("close-folder").addEventListener("click", () => folderDialog.close());
+
 document.getElementById("folder-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
@@ -1280,6 +1040,7 @@ document.getElementById("folder-form").addEventListener("submit", async (e) => {
   await refreshFolders();
   renderHead();
 });
+
 document.getElementById("delete-folder").addEventListener("click", async () => {
   if (!confirm(`フォルダ「${editingFolder.name}」を削除しますか？中の調査は消えず、フォルダの外に出ます。`)) return;
   await api("DELETE", `/api/folders/${editingFolder.id}`);
@@ -1293,66 +1054,10 @@ document.getElementById("delete-folder").addEventListener("click", async () => {
   }
 });
 
-// 開いている調査を別のフォルダへ移す
-async function moveTo(folderId) {
-  const c = currentConversation();
-  closeMenu();
-  if ((c.folder_id ?? null) === folderId) return;
-  await api("PATCH", `/api/conversations/${c.id}`, { folder_id: folderId });
-  c.folder_id = folderId;
-  await Promise.all([refreshFolders(), refreshList()]);
-  applySelection();
-  renderHead();
-}
-crumb.addEventListener("click", () => startNew(activeFolderId()));
+// ---- 開いている調査の見出しと操作 ----
 
-// ---- メモ（全体と、今のフォルダ） ----
-
-const MEMO_LENGTH = 2000; // サーバーの上限（web.MEMO_LENGTH）と同じ
-const memoDialog = document.getElementById("memo-dialog");
-const globalMemo = document.getElementById("global-memo");
-const folderMemo = document.getElementById("folder-memo");
-
-function countMemo(field, counter) {
-  const n = field.value.trim().length;
-  counter.textContent = `${n} / ${MEMO_LENGTH}文字`;
-  counter.classList.toggle("over", n > MEMO_LENGTH);
-}
-
-async function openMemo() {
-  const [settings] = await Promise.all([api("GET", "/api/settings"), refreshFolders()]);
-  const folder = activeFolder();
-  globalMemo.value = settings.memo;
-  document.getElementById("folder-memo-field").hidden = !folder;
-  if (folder) {
-    document.getElementById("folder-memo-name").textContent = `「${folder.name}」`;
-    folderMemo.value = folder.memo;
-  }
-  document.getElementById("memo-status").textContent = "";
-  countMemo(globalMemo, document.getElementById("global-memo-count"));
-  countMemo(folderMemo, document.getElementById("folder-memo-count"));
-  memoDialog.showModal();
-}
-
-document.getElementById("open-memo").addEventListener("click", openMemo);
-document.getElementById("close-memo").addEventListener("click", () => memoDialog.close());
-globalMemo.addEventListener("input", () => countMemo(globalMemo, document.getElementById("global-memo-count")));
-folderMemo.addEventListener("input", () => countMemo(folderMemo, document.getElementById("folder-memo-count")));
-document.getElementById("memo-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const folder = activeFolder();
-  try {
-    await api("PATCH", "/api/settings", { memo: globalMemo.value });
-    if (folder) await api("PATCH", `/api/folders/${folder.id}`, { memo: folderMemo.value });
-  } catch (err) {
-    document.getElementById("memo-status").textContent = err.message;
-    return;
-  }
-  await refreshFolders();
-  memoDialog.close();
-});
-
-// ---- 開いている会話の見出し（フォルダ・名前・アーカイブ） ----
+const archiveButton = document.getElementById("archive");
+const crumb = document.getElementById("folder-crumb");
 
 // 新しい会話を送った直後は、まだ一覧にないので draft（仮の名前）を出す
 function renderHead(draft) {
@@ -1382,7 +1087,89 @@ function renderHead(draft) {
   }
 }
 
-// ---- 書き出し ----
+function renameConversation() {
+  const c = currentConversation();
+  if (!c || titleEl.querySelector("input")) return;
+  const field = el("input", "title-input");
+  field.value = c.title;
+  field.maxLength = 80;
+  const done = async (save) => {
+    const title = field.value.trim();
+    if (save && title && title !== c.title) {
+      await api("PATCH", `/api/conversations/${c.id}`, { title });
+      c.title = title;
+      renderList();
+    }
+    renderHead();
+  };
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) field.blur();
+    if (e.key === "Escape") {
+      field.value = c.title;
+      field.blur();
+    }
+  });
+  field.addEventListener("blur", () => done(true));
+  titleEl.replaceChildren(field);
+  field.focus();
+  field.select();
+}
+
+titleEl.addEventListener("click", renameConversation);
+
+crumb.addEventListener("click", () => startNew(activeFolderId()));
+
+const menuButton = document.getElementById("conv-menu-button");
+const menu = document.getElementById("conv-menu");
+
+function closeMenu() {
+  menu.hidden = true;
+  menuButton.setAttribute("aria-expanded", "false");
+}
+
+menuButton.addEventListener("click", (e) => {
+  e.stopPropagation();
+  menu.hidden = !menu.hidden;
+  menuButton.setAttribute("aria-expanded", String(!menu.hidden));
+  if (!menu.hidden) menu.querySelector("button")?.focus();
+});
+
+document.addEventListener("click", (e) => !menu.hidden && !menu.contains(e.target) && closeMenu());
+
+document.addEventListener("keydown", (e) => e.key === "Escape" && !menu.hidden && (closeMenu(), menuButton.focus()));
+
+document.getElementById("rename").addEventListener("click", () => {
+  closeMenu();
+  renameConversation();
+});
+
+document.getElementById("delete-conversation").addEventListener("click", () => {
+  closeMenu();
+  deleteConversation(currentId);
+});
+
+archiveButton.addEventListener("click", async () => {
+  const c = currentConversation();
+  closeMenu();
+  await api("PATCH", `/api/conversations/${c.id}`, { archived: !c.archived });
+  c.archived = !c.archived;
+  renderHead();
+  await refreshList();
+});
+
+const moveSelect = document.getElementById("move-folder");
+
+// 開いている調査を別のフォルダへ移す
+async function moveTo(folderId) {
+  const c = currentConversation();
+  closeMenu();
+  if ((c.folder_id ?? null) === folderId) return;
+  await api("PATCH", `/api/conversations/${c.id}`, { folder_id: folderId });
+  c.folder_id = folderId;
+  await Promise.all([refreshFolders(), refreshList()]);
+  applySelection();
+  renderHead();
+}
 
 // 開いている調査を、質問・回答・出典のMarkdownにしてファイルに保存する
 document.getElementById("export").addEventListener("click", async () => {
@@ -1420,66 +1207,7 @@ function fileName(title) {
   return title.replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 60) || "調査";
 }
 
-// ---- 使い方 ----
-
-const helpDialog = document.getElementById("help");
-document.getElementById("open-help").addEventListener("click", () => helpDialog.showModal());
-helpDialog.querySelector("[data-close]").addEventListener("click", () => helpDialog.close());
-
-// ---- キーボード ----
-
-document.addEventListener("keydown", (e) => {
-  const mod = e.ctrlKey || e.metaKey;
-  // 文字を打っている最中でなければ、? で使い方を開く
-  const typing = e.target.closest("input, textarea, select, [contenteditable]");
-  if (e.key === "?" && !typing && !mod && !document.querySelector("dialog[open]")) {
-    e.preventDefault();
-    helpDialog.showModal();
-    return;
-  }
-  if (mod && !e.shiftKey && e.key.toLowerCase() === "k") {
-    e.preventDefault();
-    search.focus();
-    search.select();
-  } else if (mod && e.shiftKey && e.key.toLowerCase() === "o") {
-    e.preventDefault();
-    startNew(viewFolderId);
-  }
-});
-
-function renameConversation() {
-  const c = currentConversation();
-  if (!c || titleEl.querySelector("input")) return;
-  const field = el("input", "title-input");
-  field.value = c.title;
-  field.maxLength = 80;
-  const done = async (save) => {
-    const title = field.value.trim();
-    if (save && title && title !== c.title) {
-      await api("PATCH", `/api/conversations/${c.id}`, { title });
-      c.title = title;
-      renderList();
-    }
-    renderHead();
-  };
-  field.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.isComposing) field.blur();
-    if (e.key === "Escape") {
-      field.value = c.title;
-      field.blur();
-    }
-  });
-  field.addEventListener("blur", () => done(true));
-  titleEl.replaceChildren(field);
-  field.focus();
-  field.select();
-}
-
-function highlightCurrent() {
-  for (const item of list.querySelectorAll(".conv")) item.classList.toggle("active", item.dataset.id === currentId);
-}
-
-// ---- 調査と回答 ----
+// ---- 調査と回答の表示 ----
 
 // 1往復分の入れ物。質問を出し、回答はあとから足す
 // index は質問のターンの位置。やり直すときにサーバーへ渡す
@@ -1955,7 +1683,348 @@ function stepView(step) {
   return node;
 }
 
+function markdownView(text) {
+  const node = el("div", "markdown");
+  node.append(renderMarkdown(text));
+  // コードブロック（コマンドや設定）は、そのままコピーできるようにする
+  for (const pre of node.querySelectorAll("pre")) {
+    const button = copyButton(pre.textContent);
+    button.classList.add("code-copy");
+    button.title = "このコードをコピー";
+    pre.append(button);
+  }
+  return node;
+}
+
+// ---- 最初の画面 ----
+
+// 最初の画面に出す質問の例
+const EXAMPLES = [
+  "監視サーバーのディスク増設ってどうなった？",
+  "VPN証明書の更新手順ってどこかにまとまってる？",
+  "先月あった障害対応の経緯を教えて",
+];
+
+function showEmpty() {
+  openedConversation = null;
+  turnCount = 0;
+  setPlaceholder(null);
+  renderHead();
+  const node = el("div", "empty");
+  node.id = "empty";
+  const logo = el("img", "empty-logo");
+  logo.src = "/static/ghost.svg";
+  logo.alt = "";
+  const examples = el("div", "examples");
+  for (const text of EXAMPLES) {
+    const example = el("button", "example", text);
+    example.type = "button";
+    example.addEventListener("click", () => {
+      input.value = text;
+      autosize();
+      input.focus();
+    });
+    examples.append(example);
+  }
+  const folder = activeFolder();
+  const heading = folder ? `フォルダ「${folder.name}」で調べる` : "あの話、どうなったっけ？";
+  const note = folder
+    ? "このフォルダの調査は、フォルダで選んだ調べる場所を引き継ぎます。"
+    : "所員が選んだ場所を手分けして調べ、所長が経緯を根拠のリンクつきでまとめます。";
+  const destination = el("p", "destination-note", destinationNote);
+  destination.id = "destination-note";
+  const setup = el("section", "setup");
+  setup.id = "setup";
+  setup.hidden = true;
+  node.append(logo, el("h2", "", heading), el("p", "", note), examples, setup, destination);
+  log.replaceChildren(node);
+  renderSetup();
+}
+
+// ---- メモ ----
+
+const MEMO_LENGTH = 2000; // サーバーの上限（turns.MEMO_LENGTH）と同じ
+const memoDialog = document.getElementById("memo-dialog");
+const globalMemo = document.getElementById("global-memo");
+const folderMemo = document.getElementById("folder-memo");
+
+function countMemo(field, counter) {
+  const n = field.value.trim().length;
+  counter.textContent = `${n} / ${MEMO_LENGTH}文字`;
+  counter.classList.toggle("over", n > MEMO_LENGTH);
+}
+
+async function openMemo() {
+  const [settings] = await Promise.all([api("GET", "/api/settings"), refreshFolders()]);
+  const folder = activeFolder();
+  globalMemo.value = settings.memo;
+  document.getElementById("folder-memo-field").hidden = !folder;
+  if (folder) {
+    document.getElementById("folder-memo-name").textContent = `「${folder.name}」`;
+    folderMemo.value = folder.memo;
+  }
+  document.getElementById("memo-status").textContent = "";
+  countMemo(globalMemo, document.getElementById("global-memo-count"));
+  countMemo(folderMemo, document.getElementById("folder-memo-count"));
+  memoDialog.showModal();
+}
+
+document.getElementById("open-memo").addEventListener("click", openMemo);
+
+document.getElementById("close-memo").addEventListener("click", () => memoDialog.close());
+
+globalMemo.addEventListener("input", () => countMemo(globalMemo, document.getElementById("global-memo-count")));
+
+folderMemo.addEventListener("input", () => countMemo(folderMemo, document.getElementById("folder-memo-count")));
+
+document.getElementById("memo-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const folder = activeFolder();
+  try {
+    await api("PATCH", "/api/settings", { memo: globalMemo.value });
+    if (folder) await api("PATCH", `/api/folders/${folder.id}`, { memo: folderMemo.value });
+  } catch (err) {
+    document.getElementById("memo-status").textContent = err.message;
+    return;
+  }
+  await refreshFolders();
+  memoDialog.close();
+});
+
+// ---- ソースと接続（接続確認とMCPサーバー） ----
+
+const statusDialog = document.getElementById("status");
+
+document.getElementById("open-status").addEventListener("click", async () => {
+  const [status, mcp] = await Promise.all([api("GET", "/api/status"), api("GET", "/api/mcp")]);
+  renderStatus(status);
+  renderMcp(mcp);
+  closeMcpForm();
+  statusDialog.showModal();
+});
+
+document.getElementById("close-status").addEventListener("click", () => statusDialog.close());
+
+document.getElementById("run-check").addEventListener("click", async (e) => {
+  const button = e.currentTarget;
+  button.disabled = true;
+  button.textContent = "確認中…";
+  try {
+    renderStatus(await api("GET", "/api/status"), await api("POST", "/api/check"));
+  } finally {
+    button.disabled = false;
+    button.textContent = "確認する";
+  }
+});
+
+function renderStatus(status, results) {
+  const STATES = { ok: ["done", "OK"], error: ["failed", "エラー"], unset: ["unset", "未設定"] };
+  const row = (name, result) => {
+    const tr = el("tr");
+    const state = el("td");
+    if (result.state) state.append(el("span", `pill ${STATES[result.state][0]}`, STATES[result.state][1]));
+    tr.append(el("th", "", name), state, el("td", "status-message", result.message));
+    return tr;
+  };
+  const rows = [row("LLM", results?.llm ?? { message: `${status.llm.model}（${status.llm.base_url}）` })];
+  for (const s of status.sources) {
+    // MCPサーバーがつながらないのは「未設定」ではなくエラー（下の一覧から直す）
+    const unset = s.mcp ? { state: "error", message: s.requires } : { state: "unset", message: `${s.requires} を .env に書くと使えます` };
+    rows.push(row(s.label, results?.sources[s.id] ?? (s.configured ? { message: "設定済み（まだ確認していません）" } : unset)));
+  }
+  document.getElementById("status-table").replaceChildren(...rows);
+}
+
+// results（確認の結果）がなければ、設定の有無だけ出す
+const mcpForm = document.getElementById("mcp-form");
+// 編集しているサーバーのキー（null なら足す）
+let mcpEditing = null;
+
+function renderMcp({ path, servers }) {
+  document.getElementById("mcp-path").textContent = path;
+  const list = document.getElementById("mcp-list");
+  if (!servers.length) {
+    list.replaceChildren(el("div", "conv-empty", "まだありません。「＋ 足す」から足せます。"));
+    return;
+  }
+  list.replaceChildren(
+    ...servers.map((s) => {
+      const item = el("div", "mcp-item");
+      const head = el("div", "mcp-head");
+      head.append(
+        el("b", "", s.label),
+        el("span", s.connected ? "pill done" : "pill failed", s.connected ? "つながっています" : "つながりません"),
+        el("span", "mcp-where", s.url ?? [s.command, ...(s.args ?? [])].join(" ")),
+      );
+      const edit = el("button", "quiet", "編集");
+      edit.type = "button";
+      edit.addEventListener("click", () => openMcpForm(s));
+      const remove = el("button", "quiet danger", "外す");
+      remove.type = "button";
+      remove.addEventListener("click", async () => {
+        if (!confirm(`MCPサーバー「${s.label}」を外しますか？`)) return;
+        renderMcp(await api("DELETE", `/api/mcp/${s.key}`));
+        await refreshSources();
+      });
+      head.append(edit, remove);
+      const detail = s.connected
+        ? el("div", "mcp-detail", `使えるツール: ${s.tools.join(", ") || "なし"}`)
+        : el("div", "mcp-detail error-text", s.error);
+      item.append(head, detail);
+      return item;
+    }),
+  );
+}
+
+// 「名前: 値」「名前=値」の行を読み書きする
+function parseLines(text, separator) {
+  const result = {};
+  for (const line of text.split("\n")) {
+    const at = line.indexOf(separator);
+    if (at > 0) result[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+  }
+  return result;
+}
+
+function formatLines(dict = {}, separator) {
+  return Object.entries(dict)
+    .map(([k, v]) => `${k}${separator}${v}`)
+    .join("\n");
+}
+
+function setMcpKind(kind) {
+  for (const radio of mcpForm.querySelectorAll('[name="mcp-kind"]')) radio.checked = radio.value === kind;
+  document.getElementById("mcp-url-fields").hidden = kind !== "url";
+  document.getElementById("mcp-command-fields").hidden = kind !== "command";
+}
+
+function openMcpForm(server = null) {
+  mcpEditing = server?.key ?? null;
+  document.getElementById("mcp-form-title").textContent = server ? `「${server.label}」を編集` : "MCPサーバーを足す";
+  document.getElementById("mcp-label").value = server?.label ?? "";
+  document.getElementById("mcp-url").value = server?.url ?? "";
+  document.getElementById("mcp-type").value = server?.type ?? "";
+  document.getElementById("mcp-headers").value = formatLines(server?.headers, ": ");
+  document.getElementById("mcp-command").value = server?.command ?? "";
+  document.getElementById("mcp-args").value = (server?.args ?? []).join("\n");
+  document.getElementById("mcp-env").value = formatLines(server?.env, "=");
+  document.getElementById("mcp-status").textContent = "";
+  setMcpKind(server?.command ? "command" : "url");
+  mcpForm.hidden = false;
+  document.getElementById("mcp-label").focus();
+}
+
+function closeMcpForm() {
+  mcpForm.hidden = true;
+}
+
+// ソースが増減したので、入力欄のチップと接続確認の表を描き直す
+async function refreshSources() {
+  await loadConfig();
+  renderStatus(await api("GET", "/api/status"));
+}
+
+document.getElementById("add-mcp").addEventListener("click", () => openMcpForm());
+
+document.getElementById("mcp-cancel").addEventListener("click", closeMcpForm);
+
+for (const radio of mcpForm.querySelectorAll('[name="mcp-kind"]')) radio.addEventListener("change", () => setMcpKind(radio.value));
+
+mcpForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const kind = mcpForm.querySelector('[name="mcp-kind"]:checked').value;
+  const conf = { label: document.getElementById("mcp-label").value };
+  if (kind === "url") {
+    conf.url = document.getElementById("mcp-url").value;
+    conf.type = document.getElementById("mcp-type").value || undefined;
+    conf.headers = parseLines(document.getElementById("mcp-headers").value, ":");
+  } else {
+    conf.command = document.getElementById("mcp-command").value;
+    conf.args = document.getElementById("mcp-args").value.split("\n").map((a) => a.trim()).filter(Boolean);
+    conf.env = parseLines(document.getElementById("mcp-env").value, "=");
+  }
+  const save = document.getElementById("mcp-save");
+  const status = document.getElementById("mcp-status");
+  save.disabled = true;
+  status.textContent = "つないでいます…";
+  try {
+    const result = mcpEditing ? await api("PUT", `/api/mcp/${mcpEditing}`, conf) : await api("POST", "/api/mcp", conf);
+    renderMcp(result);
+    closeMcpForm();
+    await refreshSources();
+  } catch (err) {
+    status.textContent = err.message;
+  } finally {
+    save.disabled = false;
+    if (status.textContent === "つないでいます…") status.textContent = "";
+  }
+});
+
+// ---- キャラクター ----
+
+const characterDialog = document.getElementById("characters");
+
+document.getElementById("open-characters").addEventListener("click", async () => {
+  renderCharacters(await api("GET", "/api/characters"));
+  characterDialog.showModal();
+});
+
+document.getElementById("close-characters").addEventListener("click", () => characterDialog.close());
+
+// 名前が変わったらソースの表示（所員の名前）も変わる
+characterDialog.addEventListener("close", loadConfig);
+
+function renderCharacters(characters) {
+  document.getElementById("character-list").replaceChildren(...characters.map(characterForm));
+}
+
+function characterForm(c) {
+  const form = el("form", "character");
+  const name = el("input");
+  name.id = `character-name-${c.key}`;
+  name.value = c.name;
+  name.maxLength = 20;
+  name.required = true;
+  const persona = el("textarea");
+  persona.id = `character-persona-${c.key}`;
+  persona.value = c.persona;
+  persona.maxLength = 300;
+  persona.rows = 2;
+  const status = el("span", "character-status");
+  const reset = el("button", "quiet", "既定に戻す");
+  reset.type = "button";
+  const save = el("button", "primary", "保存");
+
+  const run = async (request) => {
+    try {
+      renderCharacters(await request());
+    } catch (err) {
+      status.textContent = err.message;
+    }
+  };
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    run(() => api("PUT", `/api/characters/${c.key}`, { name: name.value, persona: persona.value }));
+  });
+  reset.addEventListener("click", () => run(() => api("DELETE", `/api/characters/${c.key}`)));
+
+  const actions = el("div", "dialog-actions");
+  actions.append(status, reset, save);
+  form.append(el("div", "character-role", c.role), labeled("名前", name), labeled("性格", persona), actions);
+  return form;
+}
+
+function labeled(text, control) {
+  const label = el("label", "field");
+  label.append(el("span", "", text), control);
+  return label;
+}
+
 // ---- LLMとのやりとり ----
+
+const traceDialog = document.getElementById("trace");
+
+document.getElementById("close-trace").addEventListener("click", () => traceDialog.close());
 
 const ROLE_LABELS = { system: "指示（システム）", human: "依頼", ai: "LLM", tool: "ツールの結果" };
 
@@ -1998,6 +2067,42 @@ function messageView(m) {
   return node;
 }
 
+// ---- 使い方 ----
+
+const helpDialog = document.getElementById("help");
+
+document.getElementById("open-help").addEventListener("click", () => helpDialog.showModal());
+
+helpDialog.querySelector("[data-close]").addEventListener("click", () => helpDialog.close());
+
+// ---- キーボード ----
+
+document.addEventListener("keydown", (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  // 文字を打っている最中でなければ、? で使い方を開く
+  const typing = e.target.closest("input, textarea, select, [contenteditable]");
+  if (e.key === "?" && !typing && !mod && !document.querySelector("dialog[open]")) {
+    e.preventDefault();
+    helpDialog.showModal();
+    return;
+  }
+  if (mod && !e.shiftKey && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    search.focus();
+    search.select();
+  } else if (mod && e.shiftKey && e.key.toLowerCase() === "o") {
+    e.preventDefault();
+    startNew(viewFolderId);
+  }
+});
+
+// ---- 通信と小物 ----
+
+// ボタンの文字だけを変える（アイコンは残す）
+function setLabel(button, text) {
+  button.replaceChildren(...button.querySelectorAll("svg"), text);
+}
+
 // アイコンつきのボタン
 function iconButton(name, text, className = "") {
   const button = el("button", className);
@@ -2021,21 +2126,6 @@ function copyButton(text) {
   });
   return button;
 }
-
-function markdownView(text) {
-  const node = el("div", "markdown");
-  node.append(renderMarkdown(text));
-  // コードブロック（コマンドや設定）は、そのままコピーできるようにする
-  for (const pre of node.querySelectorAll("pre")) {
-    const button = copyButton(pre.textContent);
-    button.classList.add("code-copy");
-    button.title = "このコードをコピー";
-    pre.append(button);
-  }
-  return node;
-}
-
-// ---- 通信と小物 ----
 
 // NDJSON（1行1イベント）のレスポンスを読みながら onEvent を呼ぶ。切れたら返る
 async function readLines(path, onEvent) {
@@ -2085,45 +2175,10 @@ function scrollToBottom() {
 }
 
 let followBottom = true;
+
 log.addEventListener("scroll", () => {
   followBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
 });
-
-function showEmpty() {
-  openedConversation = null;
-  turnCount = 0;
-  setPlaceholder(null);
-  renderHead();
-  const node = el("div", "empty");
-  node.id = "empty";
-  const logo = el("img", "empty-logo");
-  logo.src = "/static/ghost.svg";
-  logo.alt = "";
-  const examples = el("div", "examples");
-  for (const text of EXAMPLES) {
-    const example = el("button", "example", text);
-    example.type = "button";
-    example.addEventListener("click", () => {
-      input.value = text;
-      autosize();
-      input.focus();
-    });
-    examples.append(example);
-  }
-  const folder = activeFolder();
-  const heading = folder ? `フォルダ「${folder.name}」で調べる` : "あの話、どうなったっけ？";
-  const note = folder
-    ? "このフォルダの調査は、フォルダで選んだ調べる場所を引き継ぎます。"
-    : "所員が選んだ場所を手分けして調べ、所長が経緯を根拠のリンクつきでまとめます。";
-  const destination = el("p", "destination-note", destinationNote);
-  destination.id = "destination-note";
-  const setup = el("section", "setup");
-  setup.id = "setup";
-  setup.hidden = true;
-  node.append(logo, el("h2", "", heading), el("p", "", note), examples, setup, destination);
-  log.replaceChildren(node);
-  renderSetup();
-}
 
 function autosize() {
   input.style.height = "auto";
@@ -2131,9 +2186,13 @@ function autosize() {
 }
 
 // ---- 起動 ----
+
 // すべての宣言がすんでから動かすため、ファイルの最後に置く
 // ソースの一覧と、フォルダの外での選択がそろってから入力欄を描く
 Promise.all([loadConfig(), refreshFolders()]).then(() => applySelection());
+
 refreshList();
+
 showEmpty();
+
 connectEvents();
