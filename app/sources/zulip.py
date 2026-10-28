@@ -18,7 +18,6 @@ from langchain_core.tools import tool
 from app.sources import http, scope
 from app.sources.base import Source
 
-# 古いセルフホスト版でも動くよう、チャンネルは "stream" と書く（新しい版でも通る）
 # Zulipの検索は期間で絞れないので、多めに取ってからこちらで日付を絞る
 FETCH_LIMIT = 100
 SEARCH_LIMIT = 20
@@ -93,6 +92,7 @@ def search_zulip(query: str, since: str | None = None, until: str | None = None,
     for c in channels:
         narrow = [{"operator": "search", "operand": query}]
         if c:
+            # 古いセルフホスト版でも動くよう、チャンネルは "stream" と書く（新しい版でも通る）
             narrow.append({"operator": "stream", "operand": c})
         found += _messages(narrow, FETCH_LIMIT)
     found.sort(key=lambda m: m["timestamp"])

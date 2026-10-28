@@ -3,10 +3,16 @@ import unittest
 from unittest import mock
 
 from app import sources
-from app.sources import dummy, github
+from app.sources import dummy, github, mcp_servers
 
 
 class SampleSourcesTest(unittest.TestCase):
+    def setUp(self):
+        # 手元に設定したMCPサーバーがあっても、本物のソースとして数えないように
+        patch = mock.patch.object(mcp_servers, "_loaded", {})
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def ids(self):
         return [s["id"] for s in sources.describe()]
 
