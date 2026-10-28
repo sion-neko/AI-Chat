@@ -25,9 +25,10 @@ let folders = [];
 let viewFolderId = null;
 // 入力欄の選択 {unchecked: [外したソースID], scopes: {ソースID: [名前]}}。今のフォルダ（なければ全体）に保存する
 let selection = { unchecked: [], scopes: {} };
-// 所長の名前（回答の見出しに使う）と、ソースIDから画面の名前への対応
+// 設定（/api/config）。モデル・画像を読めるか・送り先・使えるソースと所員など
+let appConfig = null;
+// 所長の名前（回答の見出しに使う）。設定から取り、調査中に名前が届いたらそれに合わせる
 let directorName = "所長";
-let sourceLabels = new Map();
 
 // よく使う要素
 const log = document.getElementById("log");
@@ -448,8 +449,6 @@ const attachFile = document.getElementById("attach-file");
 const composerStatus = document.getElementById("composer-status");
 // 添えた画像（data URL）
 let attachments = [];
-// 今のモデルが画像を読めるか（設定から）
-let visionEnabled = false;
 
 function showComposerStatus(text) {
   composerStatus.textContent = text;
@@ -488,7 +487,7 @@ async function addTextFiles(files) {
 async function addImages(files) {
   const images = [...files].filter((f) => f.type.startsWith("image/"));
   if (!images.length) return;
-  if (!visionEnabled) return showComposerStatus("今のモデルは画像を読めません");
+  if (!appConfig?.vision) return showComposerStatus("今のモデルは画像を読めません");
   for (const file of images) {
     if (attachments.length >= IMAGE_COUNT) {
       showComposerStatus(`画像は${IMAGE_COUNT}枚までです`);
@@ -566,24 +565,20 @@ form.addEventListener("drop", (e) => {
 
 // ---- 設定と調べる場所 ----
 
-// 使えるソースの一覧（入力欄を描き直すときに使う）
-let sourceList = [];
-
 async function loadConfig() {
   const c = await api("GET", "/api/config");
   appConfig = c;
   renderDestination(c);
   renderSetup();
-  visionEnabled = c.vision;
   attachFile.accept = (c.vision ? "image/png,image/jpeg,image/webp,image/gif," : "") + TEXT_FILE_TYPES;
   directorName = c.director;
-  sourceList = c.sources;
-  sourceLabels = new Map(c.sources.map((s) => [s.id, s.label]));
   renderSources(c.sources);
 }
 
-// 設定（/api/config）。はじめにの案内に使う
-let appConfig = null;
+// ソースIDから画面の名前（調査中の所員の行に出す）
+function sourceLabel(id) {
+  return appConfig?.sources.find((s) => s.id === id)?.label ?? id;
+}
 
 // 最初の画面の「はじめに」。モックのLLMやサンプルのソースで動いているときに、何を設定すれば本番で使えるかを出す
 function renderSetup() {
@@ -651,7 +646,7 @@ function activeFolder() {
 async function applySelection() {
   const saved = activeFolder()?.selection ?? (await api("GET", "/api/settings")).selection;
   selection = { unchecked: saved.unchecked ?? [], scopes: saved.scopes ?? {} };
-  renderSources(sourceList);
+  renderSources(appConfig?.sources ?? []);
 }
 
 // 入力欄の選択を、今のフォルダ（なければ全体）に保存する
@@ -1546,7 +1541,7 @@ function progressView(startedAt = Date.now() / 1000, consult = false) {
       record.hidden = false;
       meta.textContent = "所員が調べています…";
       if (!rows.has(event.source)) {
-        const row = memberRow(event.agent, sourceLabels.get(event.source) ?? event.source);
+        const row = memberRow(event.agent, sourceLabel(event.source));
         rows.set(event.source, row);
         members.append(row.node);
       }
@@ -1571,7 +1566,7 @@ function progressView(startedAt = Date.now() / 1000, consult = false) {
       drawAnswer();
     } else if (event.type === "followup") {
       meta.textContent = "再調査を頼みました";
-      const row = memberRow(event.agent, sourceLabels.get(event.source) ?? event.source, event.instruction);
+      const row = memberRow(event.agent, sourceLabel(event.source), event.instruction);
       rows.set(event.source, row);
       members.append(row.node);
       row.set("followup", "再調査を依頼", "");
