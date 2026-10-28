@@ -6,11 +6,11 @@
 API:
   GET    /api/config
   GET    /api/conversations?q=&archived=1&folder= 会話一覧。q は空白区切りのANDで、タイトルと中身を探す。folder でフォルダを絞る
-  POST   /api/conversations               {content, sources, folder_id?, images?} 新しい会話を作って最初の質問をする
+  POST   /api/conversations               {content, sources, scopes?, skip_clarify?, images?, folder_id?} 新しい会話を作って最初の質問をする
   GET    /api/conversations/{id}          会話の中身（ターン単位）
   PATCH  /api/conversations/{id}          {title?, archived?, folder_id?, unread?} 名前・アーカイブ・フォルダ・未読の印を変える（folder_id: null でフォルダの外へ）
   DELETE /api/conversations/{id}          会話を消す（調査中なら止める）
-  POST   /api/conversations/{id}/messages {content, sources, from_turn?, followup?, images?} 続きの質問をする（app/turns.py の ask）
+  POST   /api/conversations/{id}/messages {content, sources, scopes?, skip_clarify?, images?, from_turn?, followup?} 続きの質問をする（app/turns.py の ask）
   POST   /api/turns/{turn_id}/cancel      調査中のターンを中止する
   GET    /api/events                      調査の進み具合（NDJSON。つないでいる間ずっと流れる）
   GET    /api/traces/{trace_id}           1ターン分のLLMとのやりとり

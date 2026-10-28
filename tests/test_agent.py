@@ -139,7 +139,17 @@ class AgentTest(unittest.TestCase):
         self.assertIn("LLM_TIMEOUT", agent.explain_error(openai.APITimeoutError(request=request)))
         too_long = openai.BadRequestError("This model's maximum context length is 8192 tokens", response=httpx.Response(400, request=request), body=None)
         self.assertIn("長すぎて", agent.explain_error(too_long))
+        for error, setting in ((openai.AuthenticationError, "LLM_API_KEY"), (openai.NotFoundError, "LLM_MODEL")):
+            status = 401 if error is openai.AuthenticationError else 404
+            self.assertIn(setting, agent.explain_error(error("x", response=httpx.Response(status, request=request), body=None)))
         self.assertEqual(agent.explain_error(ValueError("x")), "ValueError: x")
+
+    def test_check_llm(self):
+        with mock.patch.object(agent, "_llm", FakeLLM([])):
+            self.assertEqual(agent.check_llm(), {"state": "ok", "message": "fake-1 が応答しました"})
+        broken = mock.Mock(invoke=mock.Mock(side_effect=ValueError("x")))
+        with mock.patch.object(agent, "_llm", broken):
+            self.assertEqual(agent.check_llm(), {"state": "error", "message": "ValueError: x"})
 
     def test_followup_runs_member_again_then_answers(self):
         llm = FakeLLM([{"source": "dummy_chat", "instruction": "10月に絞って"}, {"source": "nope", "instruction": "x"}])

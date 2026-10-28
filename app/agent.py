@@ -176,11 +176,11 @@ def explain_error(e: Exception) -> str:
     if isinstance(e, openai.APITimeoutError):
         hint = f"LLMが{LLM_TIMEOUT:g}秒のうちに答えませんでした。LLMのサーバーが混んでいないか確かめ、必要なら .env の LLM_TIMEOUT を延ばしてください"
     elif isinstance(e, openai.APIConnectionError):
-        hint = f"LLMにつながりません（{os.environ['LLM_BASE_URL']}）。LLMのサーバーが動いているか、.env の LLM_BASE_URL を確かめてください"
+        hint = f"LLMにつながりません（{os.environ.get('LLM_BASE_URL', '')}）。LLMのサーバーが動いているか、.env の LLM_BASE_URL を確かめてください"
     elif isinstance(e, openai.AuthenticationError):
         hint = "LLMに断られました。.env の LLM_API_KEY を確かめてください"
     elif isinstance(e, openai.NotFoundError):
-        hint = f"LLMにモデル {os.environ['LLM_MODEL']} が見つかりません。.env の LLM_MODEL を確かめてください"
+        hint = f"LLMにモデル {os.environ.get('LLM_MODEL', '')} が見つかりません。.env の LLM_MODEL を確かめてください"
     elif isinstance(e, openai.BadRequestError) and any(w in str(e).lower() for w in ("context", "too long", "maximum", "token")):
         hint = "会話や貼った文章が長すぎて、LLMが一度に読める量を超えました。新しい調査で、必要な部分だけを貼って聞き直してください"
     else:
