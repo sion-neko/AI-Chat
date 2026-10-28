@@ -9,6 +9,7 @@
 - [x] GitLab ソース
 - [x] Zulip ソース
 - [ ] Google Chat / Gmail ソース
+- [ ] ファイルサーバー（Synology、SMB）ソース（設計は docs/adr/0003）
 - [ ] TODO: 会議の録音・文字起こし・検索（設計は docs/adr/0002、保留中）
 - [x] 所長から所員への再調査の依頼
 - [x] Markdown表示
