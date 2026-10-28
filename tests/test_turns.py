@@ -3,6 +3,8 @@
 import os
 import queue
 import tempfile
+import threading
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -15,6 +17,25 @@ with mock.patch.dict(os.environ, {"LLM_BASE_URL": "http://unused.invalid/v1", "L
 from tests.test_agent import FakeLLM
 
 PNG = ("image/png", b"\x89PNG\r\n\x1a\n")
+
+
+def wait_for_work_threads(test: unittest.TestCase):
+    """テストの後片付けで、調査のスレッドが終わるまで待つ。
+
+    調査のスレッドは done を配ったあとも題名付けでDBを触るので、待たずに一時DBを消すとエラーが出る。
+    """
+    started = []
+
+    class Recorded(threading.Thread):
+        def start(self):
+            started.append(self)
+            super().start()
+
+    # threading モジュールそのものではなく、turns.py から見える分だけを差し替える（サーバーのスレッドは待たない）
+    patch = mock.patch.object(turns, "threading", types.SimpleNamespace(Thread=Recorded))
+    patch.start()
+    test.addCleanup(lambda: [t.join(10) for t in started])
+    test.addCleanup(patch.stop)
 
 
 class Broken(FakeLLM):
@@ -33,6 +54,7 @@ class TurnsTest(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
         db.init()
+        wait_for_work_threads(self)
         self.events = jobs.subscribe()
         self.addCleanup(jobs.unsubscribe, self.events)
 

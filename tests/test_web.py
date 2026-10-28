@@ -22,6 +22,7 @@ with mock.patch.dict(os.environ, {"LLM_BASE_URL": "http://unused.invalid/v1", "L
     from app.sources import dummy, mcp_servers
 
 from tests.test_agent import FakeLLM
+from tests.test_turns import wait_for_work_threads
 
 
 class Gate(FakeLLM):
@@ -55,6 +56,7 @@ class WebTest(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
         db.init()
+        wait_for_work_threads(self)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), web.Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
@@ -265,6 +267,14 @@ class WebTest(unittest.TestCase):
         self.assertEqual(listed[0]["name"], "シロ")
         self.assertEqual(self.call("PUT", "/api/characters/nope", {"name": "x", "persona": ""})[0], 404)
         self.assertEqual(self.call("PUT", "/api/characters/director", {"name": "", "persona": ""})[0], 400)
+
+    def test_status_and_check(self):
+        _, status = self.call("GET", "/api/status")
+        self.assertEqual(status["llm"]["model"], "fake")
+        self.assertEqual([s["id"] for s in status["sources"]], ["dummy_chat", "dummy_wiki"])
+        _, checked = self.call("POST", "/api/check")
+        self.assertEqual(checked["llm"], {"state": "ok", "message": "fake-1 が応答しました"})
+        self.assertEqual({k: v["state"] for k, v in checked["sources"].items()}, {"dummy_chat": "ok", "dummy_wiki": "ok"})
 
     def test_mcp_servers(self):
         self.assertIn("表示名", self.call("POST", "/api/mcp", {"label": " ", "url": "http://x"})[1]["error"])
