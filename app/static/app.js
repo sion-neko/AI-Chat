@@ -54,11 +54,16 @@ input.addEventListener("keydown", (e) => {
   }
 });
 
-// 調査中のターン。turn_id → { turnId, conversationId, info, events, view, turnNode, cancelling, mine }
-// info はサーバーの "job" イベントの中身（質問・質問の位置・やり直しか・続報か）
-// view と turnNode は、その会話を開いている間だけの進み具合の表示。mine はこの画面から送った質問と画像
+// 調査中のターン。turn_id → { turnId, conversationId, info, events, view, turnNode, cancelling, mine, seen }
+//   info: サーバーの "job" イベントの中身（質問・質問の位置・やり直しか・続報か）
+//   events: 届いた進み具合。会話を開き直したときに、ここから描き直す
+//   view と turnNode: その会話を開いている間だけの進み具合の表示
+//   mine: この画面から送った質問と画像（中止・失敗したら入力欄に戻す）
+//   seen: つなぎ直したときに、サーバーから流し直されたか（されなければ、その間に終わった）
 // 調査はサーバーで最後まで走るので、別の会話を開いても、画面をリロードしても続く
 const jobs = new Map();
+// 調査の終わりのイベント
+const FINISHED = new Set(["done", "cancelled", "error"]);
 
 // 質問を送っている途中（サーバーが受け付けるまで）。二重に送らないようにする
 let submitting = false;
@@ -94,14 +99,15 @@ form.addEventListener("submit", (e) => {
   autosize();
   attachments = [];
   renderAttachments();
-  ask(content, null, false, images);
+  ask(content, { images });
 });
 
-// 質問して調査させる。fromTurn（質問のターンの位置）があれば、そこから後をやり直す
-// skipClarify なら所長は聞き返さずに調べる
-// images は新しく添える画像（data URL）。shownImages は質問に並べて見せる画像（やり直しでは元の質問の画像）
-// followup なら続報の調査（直前の回答を調べた日より後の動きだけを調べる）
-async function ask(content, fromTurn, skipClarify = false, images = [], shownImages = images, followup = false) {
+// 質問して調査させる
+//   fromTurn: 質問のターンの位置。あれば、そこから後をやり直す
+//   skipClarify: 所長は聞き返さずに調べる
+//   images: 新しく添える画像（data URL）。shownImages: 質問に並べて見せる画像（やり直しでは元の質問の画像。サーバーが使い直す）
+//   followup: 続報の調査（直前の回答を調べた日より後の動きだけを調べる）
+async function ask(content, { fromTurn = null, skipClarify = false, images = [], shownImages = images, followup = false } = {}) {
   askNotificationPermission();
   if (document.getElementById("empty")) {
     log.replaceChildren();
@@ -127,7 +133,7 @@ async function ask(content, fromTurn, skipClarify = false, images = [], shownIma
     if (images.length) body.images = images;
     if (followup) body.followup = true;
     const { turn_id, conversation_id } = await api("POST", path, body);
-    if (finished.has(turn_id)) {
+    if (finishedTurns.has(turn_id)) {
       // 受け付けの返事より先に、調査が終わったと届いた（とても速いLLM）。保存された結果を開く
       if (currentId === asked) await openConversation(conversation_id);
       else await refreshList();
@@ -258,9 +264,7 @@ function onJobEvent(event) {
     job.events = [];
     job.seen = true;
     // つなぎ直したときは、描いてあった進み具合を描き直す
-    if (job.view) {
-      job.view.reset();
-    }
+    job.view?.reset();
     showJob(job);
     renderList();
     updateTitle();
@@ -271,10 +275,10 @@ function onJobEvent(event) {
   const job = jobs.get(event.turn_id);
   if (!job) {
     // 受け付けの返事より先に終わりが届いた
-    if (["done", "cancelled", "error"].includes(event.type)) finished.add(event.turn_id);
+    if (FINISHED.has(event.type)) finishedTurns.add(event.turn_id);
     return;
   }
-  if (event.type === "done" || event.type === "cancelled" || event.type === "error") return finishJob(job, event);
+  if (FINISHED.has(event.type)) return finishJob(job, event);
   job.events.push(event);
   job.view?.update(event);
 }
@@ -304,11 +308,11 @@ function lostJobs() {
 }
 
 // 終わった調査の turn_id（受け付けの返事より先に終わりが届いたときのため）
-const finished = new Set();
+const finishedTurns = new Set();
 
 function finishJob(job, event) {
   jobs.delete(job.turnId);
-  finished.add(job.turnId);
+  finishedTurns.add(job.turnId);
   // 読んだ印を付け終えてから一覧を読み直す（先に読むと、届いたばかりの未読の印が残る）
   let read = null;
   const shown = job.conversationId === currentId && job.turnNode?.isConnected;
@@ -1269,7 +1273,7 @@ function showFollowupOnLast() {
 
 function askFollowup() {
   if (busy()) return explainBusy();
-  ask("その後どうなった？", null, false, [], [], true);
+  ask("その後どうなった？", { followup: true });
 }
 
 // 添えた画像から所長が読み取った内容。読み違いに気づけるよう、たたんで出しておく
@@ -1290,7 +1294,7 @@ function redo(content, index, skipClarify = false) {
   if (busy()) return explainBusy();
   if (!confirmRedo(index)) return;
   const node = log.querySelector(`.turn[data-index="${index}"]`);
-  ask(content, index, skipClarify, [], turnImages(index), Boolean(node?.followup));
+  ask(content, { fromTurn: index, skipClarify, shownImages: turnImages(index), followup: Boolean(node?.followup) });
 }
 
 function turnImages(index) {
@@ -1322,7 +1326,7 @@ function editQuestion(node, question, index) {
     const content = field.value.trim();
     if (!content) return;
     if (busy() || !confirmRedo(index)) return;
-    ask(content, index, false, [], node.images, node.followup);
+    ask(content, { fromTurn: index, shownImages: node.images, followup: node.followup });
   });
   field.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
