@@ -3,3 +3,5 @@ _scratch/
 __pycache__/
 *.pyc
 data/
+dist/
+dist.env

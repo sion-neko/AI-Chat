@@ -169,6 +169,8 @@ details.report summary { cursor: pointer; color: var(--muted); }
 
 .report-body { margin-top: 6px; white-space: pre-wrap; }
 
+details.report > .markdown { margin-top: 6px; }
+
 details.report pre {
   margin: 6px 0;
   max-height: 240px;
@@ -178,6 +180,8 @@ details.report pre {
 }
 
 .progress { color: var(--muted); font-size: 14px; }
+
+.report-request { margin-top: 6px; color: var(--muted); }
 
 .sources {
   display: flex;
@@ -221,3 +225,119 @@ textarea {
 }
 
 textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.markdown { white-space: normal; }
+
+.markdown > :first-child { margin-top: 0; }
+
+.markdown > :last-child { margin-bottom: 0; }
+
+.markdown p, .markdown ul, .markdown ol, .markdown blockquote, .markdown pre, .markdown .table-wrap { margin: 0 0 10px; }
+
+.markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 {
+  margin: 16px 0 8px;
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.markdown h1 { font-size: 18px; }
+
+.markdown h2 { font-size: 16px; }
+
+.markdown ul, .markdown ol { padding-left: 1.5em; }
+
+.markdown li > ul, .markdown li > ol, .markdown li > p { margin: 0; }
+
+.markdown blockquote {
+  padding-left: 12px;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.markdown code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 13px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--panel);
+}
+
+.markdown pre {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--panel);
+  overflow-x: auto;
+}
+
+.markdown pre code { padding: 0; background: none; }
+
+.markdown hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+
+.markdown .table-wrap { overflow-x: auto; }
+
+.markdown table { border-collapse: collapse; font-size: 14px; }
+
+.markdown th, .markdown td {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown th { background: var(--panel); }
+
+.header-button { margin-left: auto; }
+
+dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  padding: 16px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+dialog::backdrop { background: rgb(0 0 0 / 0.4); }
+
+.dialog-head { display: flex; align-items: center; justify-content: space-between; }
+
+.dialog-head h2 { margin: 0; font-size: 16px; }
+
+.dialog-head button { border: none; background: none; font-size: 18px; padding: 0 6px; }
+
+.dialog-note { margin: 4px 0 12px; font-size: 13px; color: var(--muted); }
+
+form.character {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: none;
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.character-role { font-size: 13px; font-weight: bold; }
+
+.field { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); }
+
+.field input, .field textarea {
+  font: inherit;
+  font-size: 14px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.field textarea { resize: vertical; max-height: none; }
+
+.character-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+
+.character-status { margin-right: auto; font-size: 12px; color: var(--error); }
+
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }

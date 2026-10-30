@@ -8,10 +8,9 @@ const input = document.getElementById("input");
 const send = document.getElementById("send");
 const sourceBox = document.getElementById("sources");
 
-api("GET", "/api/config").then((c) => {
-  document.getElementById("model").textContent = c.model;
-  renderSources(c.sources);
-});
+const characterDialog = document.getElementById("characters");
+
+loadConfig();
 refreshList();
 showEmpty();
 
@@ -21,6 +20,14 @@ document.getElementById("new-chat").addEventListener("click", () => {
   highlightCurrent();
   input.focus();
 });
+
+document.getElementById("open-characters").addEventListener("click", async () => {
+  renderCharacters(await api("GET", "/api/characters"));
+  characterDialog.showModal();
+});
+document.getElementById("close-characters").addEventListener("click", () => characterDialog.close());
+// 名前が変わったらソースの表示（「GitHub（名前）」）も変わる
+characterDialog.addEventListener("close", loadConfig);
 
 input.addEventListener("input", autosize);
 input.addEventListener("keydown", (e) => {
@@ -66,13 +73,22 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
+async function loadConfig() {
+  const c = await api("GET", "/api/config");
+  document.getElementById("model").textContent = c.model;
+  renderSources(c.sources);
+}
+
+// 選択状態は描き直しても保つ（初回はすべて選択）
 function renderSources(sources) {
+  const checked = sourceBox.querySelector("input") ? new Set(selectedSources()) : null;
+  for (const label of sourceBox.querySelectorAll("label")) label.remove();
   for (const s of sources) {
     const label = el("label", "source");
     const box = el("input");
     box.type = "checkbox";
     box.value = s.id;
-    box.checked = true;
+    box.checked = checked ? checked.has(s.id) : true;
     label.append(box, `${s.label}（${s.agent}）`);
     sourceBox.append(label);
   }
@@ -80,6 +96,50 @@ function renderSources(sources) {
 
 function selectedSources() {
   return [...sourceBox.querySelectorAll("input:checked")].map((box) => box.value);
+}
+
+function renderCharacters(list) {
+  document.getElementById("character-list").replaceChildren(...list.map(characterForm));
+}
+
+function characterForm(c) {
+  const form = el("form", "character");
+  const name = el("input");
+  name.value = c.name;
+  name.maxLength = 20;
+  name.required = true;
+  const persona = el("textarea");
+  persona.value = c.persona;
+  persona.maxLength = 300;
+  persona.rows = 3;
+  const status = el("span", "character-status");
+  const reset = el("button", "", "既定に戻す");
+  reset.type = "button";
+  const save = el("button", "primary", "保存");
+
+  const run = async (request) => {
+    try {
+      renderCharacters(await request());
+    } catch (err) {
+      status.textContent = err.message;
+    }
+  };
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    run(() => api("PUT", `/api/characters/${c.key}`, { name: name.value, persona: persona.value }));
+  });
+  reset.addEventListener("click", () => run(() => api("DELETE", `/api/characters/${c.key}`)));
+
+  const actions = el("div", "character-actions");
+  actions.append(status, reset, save);
+  form.append(el("div", "character-role", c.role), labeled("名前", name), labeled("性格", persona), actions);
+  return form;
+}
+
+function labeled(text, control) {
+  const label = el("label", "field");
+  label.append(el("span", "", text), control);
+  return label;
 }
 
 async function openConversation(id) {
@@ -132,6 +192,7 @@ function progressView() {
   const node = el("div", "msg progress");
   const rows = new Map();
   const agents = new Map();
+  let director = "";
   const row = (key, text) => {
     if (!rows.has(key)) rows.set(key, node.appendChild(el("div")));
     rows.get(key).textContent = text;
@@ -148,7 +209,11 @@ function progressView() {
       const r = event.report;
       row(r.source, `👻 ${r.agent}: ${r.error ? "調査失敗" : "報告済み"}`);
     } else if (event.type === "director_start") {
-      row("director", `🕵️ ${event.agent}所長: 報告をまとめています…`);
+      director = event.agent;
+      row("director", `🕵️ ${director}所長: 報告をまとめています…`);
+      node.append(rows.get("director")); // 再調査の後は最後の行に移す
+    } else if (event.type === "followup") {
+      row(`followup:${event.source}`, `🕵️ ${director}所長 → ${event.agent}: 再調査を依頼「${event.instruction}」`);
     }
   };
   return { node, update };
@@ -158,38 +223,27 @@ function assistantMessage({ agent, content, model, reports }) {
   const box = el("div", "msg assistant");
   box.append(el("div", "meta", `${agent}所長 · ${model}`));
   for (const r of reports) box.append(reportView(r));
-  box.append(linkify(content));
+  box.append(markdownView(content));
   return box;
 }
 
 function reportView(report) {
   const details = el("details", "report");
   const status = report.error ? "調査失敗" : `検索 ${report.steps.length}回`;
-  details.append(el("summary", "", `👻 ${report.agent}（${report.label}）の報告 · ${status}`));
+  const kind = report.request ? "再調査の報告" : "報告";
+  details.append(el("summary", "", `👻 ${report.agent}（${report.label}）の${kind} · ${status}`));
+  if (report.request) details.append(el("div", "report-request", `所長からの依頼: ${report.request}`));
   for (const s of report.steps) {
     details.append(el("pre", "", `${s.tool}(${JSON.stringify(s.args)})\n→ ${s.result || "(結果なし)"}`));
   }
-  const body = el("div", "report-body");
-  body.append(report.error ? `エラー: ${report.error}` : linkify(report.content || "（報告なし）"));
-  details.append(body);
+  details.append(report.error ? el("div", "report-body", `エラー: ${report.error}`) : markdownView(report.content || "（報告なし）"));
   return details;
 }
 
-// URLだけリンクにする。innerHTMLは使わない（回答本文をHTMLとして解釈させない）
-function linkify(text) {
-  const frag = document.createDocumentFragment();
-  let last = 0;
-  for (const m of text.matchAll(/https?:\/\/[^\s"'<>）」]+/g)) {
-    frag.append(text.slice(last, m.index));
-    const a = el("a", "", m[0]);
-    a.href = m[0];
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    frag.append(a);
-    last = m.index + m[0].length;
-  }
-  frag.append(text.slice(last));
-  return frag;
+function markdownView(text) {
+  const node = el("div", "markdown");
+  node.append(renderMarkdown(text));
+  return node;
 }
 
 // NDJSON（1行1イベント）のレスポンスを読みながら onEvent を呼ぶ。onEvent が投げた例外はそのまま伝わる
