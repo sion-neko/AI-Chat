@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage
 from app import db
 
 with mock.patch.dict(os.environ, {"LLM_BASE_URL": "http://unused.invalid/v1", "LLM_API_KEY": "x", "LLM_MODEL": "fake"}):
-    from app import agent, web
+    from app import agent, turns
 
 
 class FakeLLM:
@@ -30,10 +30,10 @@ class TitleTest(unittest.TestCase):
         db.init()
         self.conv = db.create_conversation("あの件どうなった？")
 
-    def answer(self, *turns, llm="「監視サーバーのディスク増設」。\n補足"):
-        db.append_turns(self.conv, list(turns))
+    def answer(self, *added, llm="「監視サーバーのディスク増設」。\n補足"):
+        db.append_turns(self.conv, list(added))
         with mock.patch.object(agent, "_llm", FakeLLM(llm)):
-            web.retitle(self.conv)
+            turns.retitle(self.conv)
         return db.get_conversation(self.conv)["title"]
 
     def test_titles_after_first_answer_even_after_clarify(self):

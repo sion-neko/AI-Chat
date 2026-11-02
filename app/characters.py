@@ -62,7 +62,7 @@ def save(key: str, name: str, persona: str):
     if len(name) > NAME_LENGTH:
         raise CharacterError(f"名前は{NAME_LENGTH}文字以内にしてください")
     if len(persona) > PERSONA_LENGTH:
-        raise CharacterError(f"設定は{PERSONA_LENGTH}文字以内にしてください")
+        raise CharacterError(f"性格は{PERSONA_LENGTH}文字以内にしてください")
     db.save_character(key, name, persona)
 
 

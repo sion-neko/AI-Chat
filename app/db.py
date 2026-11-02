@@ -110,12 +110,27 @@ def init():
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
+def _update(table: str, row_id: str, changes: dict) -> bool:
+    """行の、渡された列だけを書き換える。行がなければ False。列名は呼ぶ側が決めたものだけを渡す（SQLに埋め込むため）。"""
+    with connect() as conn:
+        if not conn.execute(f"SELECT 1 FROM {table} WHERE id = ?", (row_id,)).fetchone():
+            return False
+        if changes:
+            conn.execute(f"UPDATE {table} SET {', '.join(f'{k} = ?' for k in changes)} WHERE id = ?", (*changes.values(), row_id))
+    return True
+
+
+# ---- 会話 ----
+
+CONVERSATION_COLUMNS = "id, title, updated_at, archived, folder_id, unread"
+
+
 def _conversation(row) -> dict:
     return {**dict(row), "archived": bool(row["archived"]), "unread": bool(row["unread"])}
 
 
 def list_conversations(query: str = "", archived: bool = False, folder_id: str | None = None) -> list[dict]:
-    """会話の一覧。query は空白区切りのAND検索で、タイトルと中身（質問・回答・調査の記録）を探す。
+    """会話の一覧（更新が新しい順）。query は空白区切りのAND検索で、タイトルと中身（質問・回答・調査の記録）を探す。
 
     folder_id を渡すとそのフォルダの会話だけ。None ならすべて。
     """
@@ -124,19 +139,20 @@ def list_conversations(query: str = "", archived: bool = False, folder_id: str |
         where.append("folder_id = ?")
         params.append(folder_id)
     for word in query.split():
+        # LIKE の記号（% _ \）は、そのままの文字として探す
         pattern = "%" + word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         where.append(
             "(title LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM turns WHERE turns.conversation_id = conversations.id AND data LIKE ? ESCAPE '\\'))"
         )
         params += [pattern, pattern]
-    sql = f"SELECT id, title, updated_at, archived, folder_id, unread FROM conversations WHERE {' AND '.join(where)} ORDER BY updated_at DESC"
+    sql = f"SELECT {CONVERSATION_COLUMNS} FROM conversations WHERE {' AND '.join(where)} ORDER BY updated_at DESC"
     with connect() as conn:
         return [_conversation(r) for r in conn.execute(sql, params)]
 
 
 def get_conversation(conv_id: str) -> dict | None:
     with connect() as conn:
-        row = conn.execute("SELECT id, title, updated_at, archived, folder_id, unread FROM conversations WHERE id = ?", (conv_id,)).fetchone()
+        row = conn.execute(f"SELECT {CONVERSATION_COLUMNS} FROM conversations WHERE id = ?", (conv_id,)).fetchone()
         return _conversation(row) if row else None
 
 
@@ -160,12 +176,7 @@ def update_conversation(conv_id: str, **changes) -> bool:
     for key in ("archived", "unread"):
         if key in changes:
             changes[key] = int(changes[key])
-    with connect() as conn:
-        if not conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conv_id,)).fetchone():
-            return False
-        if changes:
-            conn.execute(f"UPDATE conversations SET {', '.join(f'{k} = ?' for k in changes)} WHERE id = ?", (*changes.values(), conv_id))
-    return True
+    return _update("conversations", conv_id, changes)
 
 
 def delete_conversation(conv_id: str):
@@ -177,6 +188,60 @@ def delete_empty_conversations():
     """ターンが1つもない会話を消す。最初の調査の途中でアプリが止まると残る（起動したときに呼ぶ）。"""
     with connect() as conn:
         conn.execute("DELETE FROM conversations WHERE NOT EXISTS (SELECT 1 FROM turns WHERE turns.conversation_id = conversations.id)")
+
+
+# ---- ターン（会話の中身） ----
+
+
+def load_turns(conv_id: str) -> list[dict] | None:
+    """会話のターン（古い順）。会話がなければ None（ターンのない会話の [] と区別する）。"""
+    with connect() as conn:
+        if not conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conv_id,)).fetchone():
+            return None
+        rows = conn.execute("SELECT data FROM turns WHERE conversation_id = ? ORDER BY id", (conv_id,))
+        return [json.loads(r["data"]) for r in rows]
+
+
+def _insert_turns(conn, conv_id: str, turns: list[dict]):
+    """ターンを足して、会話の更新日を今にする（一覧の上に来る）。"""
+    conn.executemany(
+        "INSERT INTO turns (conversation_id, data) VALUES (?, ?)",
+        [(conv_id, json.dumps(t, ensure_ascii=False)) for t in turns],
+    )
+    conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (_now(), conv_id))
+
+
+def append_turns(conv_id: str, turns: list[dict]):
+    with connect() as conn:
+        _insert_turns(conn, conv_id, turns)
+
+
+def replace_turns(conv_id: str, start: int, turns: list[dict]):
+    """start 番目（0始まり）以降のターンを消して turns に置き換える。消したターンのLLMの記録も消す。"""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id, data FROM turns WHERE conversation_id = ? ORDER BY id LIMIT -1 OFFSET ?", (conv_id, start)
+        ).fetchall()
+        trace_ids = [json.loads(r["data"]).get("trace_id") for r in rows]
+        conn.executemany("DELETE FROM traces WHERE id = ?", [(t,) for t in trace_ids if t])
+        conn.executemany("DELETE FROM turns WHERE id = ?", [(r["id"],) for r in rows])
+        _insert_turns(conn, conv_id, turns)
+
+
+# ---- LLMとのやりとりの記録 ----
+
+
+def save_trace(conv_id: str, calls: list[dict]) -> str:
+    trace_id = uuid.uuid4().hex
+    with connect() as conn:
+        conn.execute("INSERT INTO traces VALUES (?, ?, ?)", (trace_id, conv_id, json.dumps(calls, ensure_ascii=False)))
+    return trace_id
+
+
+def load_trace(trace_id: str) -> list[dict] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT data FROM traces WHERE id = ?", (trace_id,)).fetchone()
+        return json.loads(row["data"]) if row else None
 
 
 # ---- フォルダ ----
@@ -214,12 +279,7 @@ def update_folder(folder_id: str, **changes) -> bool:
     assert set(changes) <= {"name", "memo", "selection"}
     if "selection" in changes:
         changes["selection"] = json.dumps(changes["selection"], ensure_ascii=False)
-    with connect() as conn:
-        if not conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone():
-            return False
-        if changes:
-            conn.execute(f"UPDATE folders SET {', '.join(f'{k} = ?' for k in changes)} WHERE id = ?", (*changes.values(), folder_id))
-    return True
+    return _update("folders", folder_id, changes)
 
 
 def delete_folder(folder_id: str):
@@ -259,50 +319,7 @@ def set_setting(key: str, value):
         conn.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, json.dumps(value, ensure_ascii=False)))
 
 
-def load_turns(conv_id: str) -> list[dict] | None:
-    with connect() as conn:
-        if not conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conv_id,)).fetchone():
-            return None
-        rows = conn.execute("SELECT data FROM turns WHERE conversation_id = ? ORDER BY id", (conv_id,))
-        return [json.loads(r["data"]) for r in rows]
-
-
-def append_turns(conv_id: str, turns: list[dict]):
-    with connect() as conn:
-        conn.executemany(
-            "INSERT INTO turns (conversation_id, data) VALUES (?, ?)",
-            [(conv_id, json.dumps(t, ensure_ascii=False)) for t in turns],
-        )
-        conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (_now(), conv_id))
-
-
-def replace_turns(conv_id: str, start: int, turns: list[dict]):
-    """start 番目（0始まり）以降のターンを消して turns に置き換える。消したターンのLLMの記録も消す。"""
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT id, data FROM turns WHERE conversation_id = ? ORDER BY id LIMIT -1 OFFSET ?", (conv_id, start)
-        ).fetchall()
-        trace_ids = [json.loads(r["data"]).get("trace_id") for r in rows]
-        conn.executemany("DELETE FROM traces WHERE id = ?", [(t,) for t in trace_ids if t])
-        conn.executemany("DELETE FROM turns WHERE id = ?", [(r["id"],) for r in rows])
-        conn.executemany(
-            "INSERT INTO turns (conversation_id, data) VALUES (?, ?)",
-            [(conv_id, json.dumps(t, ensure_ascii=False)) for t in turns],
-        )
-        conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (_now(), conv_id))
-
-
-def save_trace(conv_id: str, calls: list[dict]) -> str:
-    trace_id = uuid.uuid4().hex
-    with connect() as conn:
-        conn.execute("INSERT INTO traces VALUES (?, ?, ?)", (trace_id, conv_id, json.dumps(calls, ensure_ascii=False)))
-    return trace_id
-
-
-def load_trace(trace_id: str) -> list[dict] | None:
-    with connect() as conn:
-        row = conn.execute("SELECT data FROM traces WHERE id = ?", (trace_id,)).fetchone()
-        return json.loads(row["data"]) if row else None
+# ---- キャラクター ----
 
 
 def load_characters() -> dict[str, dict]:

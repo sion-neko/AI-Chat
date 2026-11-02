@@ -1,7 +1,7 @@
 """MCPサーバーをソースにする。設定ファイルに書いたサーバー1つが、1人の所員の担当になる。
 
 設定ファイルは MCP_CONFIG（既定は data/mcp.json）。Claude Desktop などと同じ mcpServers の形で書く。
-画面（ソースの設定）から追加・編集・削除でき、そのときは再起動しなくても反映する。手で書き換えたときは再起動する。
+画面（ソースと接続）から追加・編集・削除でき、そのときは再起動しなくても反映する。手で書き換えたときは再起動する。
   {
     "mcpServers": {
       "notes": {"label": "メモ", "command": "python", "args": ["/work/data/notes_server.py"]},
@@ -115,9 +115,9 @@ def _write_config(servers: dict[str, dict]):
 
 def load() -> list[Source]:
     """設定ファイルに書かれたMCPサーバーにつなぎ、ソースにする（起動時）。"""
-    global _loaded
     with _lock:
-        _loaded = {key: _source(key, conf) for key, conf in read_config().items()}
+        _loaded.clear()
+        _loaded.update({key: _source(key, conf) for key, conf in read_config().items()})
         return list(_loaded.values())
 
 
@@ -181,8 +181,8 @@ def save(key: str, conf: dict) -> Source:
         servers[key] = conf
         _write_config(servers)
         source = _source(key, conf)
-        loaded = {k: _loaded.get(k) for k in servers}
-        loaded[key] = source
+        # 設定ファイルの順に並べ直す（足したサーバーは最後に来る）
+        loaded = {k: source if k == key else _loaded.get(k) for k in servers}
         _loaded.clear()
         _loaded.update({k: v for k, v in loaded.items() if v})
         return source

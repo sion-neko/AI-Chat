@@ -157,7 +157,8 @@ const renderMarkdown = (() => {
   const INLINE = [
     { re: /`([^`]+)`/, build: (m) => mdEl("code", m[1]) },
     { re: /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/, build: (m) => link(m[2], inline(m[1])) },
-    { re: /https?:\/\/[^\s"'<>）」\]]+/, build: (m) => link(trimUrl(m[0]), trimUrl(m[0])), rest: (m) => m[0].slice(trimUrl(m[0]).length) },
+    // 裸のURLの切れ目は、出典を照合する app/links.py の URL と同じにする（表示と照合でURLがずれないように）
+    { re: /https?:\/\/[^\s"'<>()[\]{}）」、。]+/, build: (m) => link(trimUrl(m[0]), trimUrl(m[0])), rest: (m) => m[0].slice(trimUrl(m[0]).length) },
     { re: /\*\*(.+?)\*\*|__(.+?)__/, build: (m) => wrapInline("strong", m[1] ?? m[2]) },
     { re: /~~(.+?)~~/, build: (m) => wrapInline("del", m[1]) },
     { re: /(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?!\w)|(?<!\w)_(?!\s)(.+?)(?<!\s)_(?!\w)/, build: (m) => wrapInline("em", m[1] ?? m[2]) },
@@ -183,9 +184,9 @@ const renderMarkdown = (() => {
     return frag;
   }
 
-  // 文末の句読点や閉じかっこはURLに含めない
+  // 文末の句読点はURLに含めない（app/links.py の TRAILING と同じ）
   function trimUrl(url) {
-    return url.replace(/[.,;:!?。、)]+$/, "");
+    return url.replace(/[.,;:!?]+$/, "");
   }
 
   function link(href, content) {
