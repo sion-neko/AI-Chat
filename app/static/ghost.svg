@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- おばけ探偵事務所のマスコット。白くふわっとした丸い体、頭に小さな毛、ピンクのほっぺ -->
+  <path d="M32 9c-1.5-3.5 1-6 3.5-5.5" fill="none" stroke="#4b5563" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M10 34C10 19 19.5 9 32 9s22 10 22 25v19c0 2.5-2.7 3.6-4.5 1.9l-3.2-3a3 3 0 0 0-4.2.1l-3.4 3.5a3 3 0 0 1-4.3 0l-2.3-2.4a3 3 0 0 0-4.3 0l-2.3 2.4a3 3 0 0 1-4.3 0l-3.4-3.5a3 3 0 0 0-4.2-.1l-3.2 3C12.7 56.6 10 55.5 10 53z"
+        fill="#ffffff" stroke="#4b5563" stroke-width="2.2" stroke-linejoin="round"/>
+  <ellipse cx="24.5" cy="31" rx="2.6" ry="3.4" fill="#374151"/>
+  <ellipse cx="39.5" cy="31" rx="2.6" ry="3.4" fill="#374151"/>
+  <ellipse cx="19.5" cy="38" rx="3.6" ry="2.2" fill="#f9a8b8"/>
+  <ellipse cx="44.5" cy="38" rx="3.6" ry="2.2" fill="#f9a8b8"/>
+  <path d="M29 38.5q3 2.6 6 0" fill="none" stroke="#374151" stroke-width="2" stroke-linecap="round"/>
+</svg>

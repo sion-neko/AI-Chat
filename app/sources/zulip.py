@@ -108,9 +108,15 @@ def get_zulip_topic(channel: str, topic: str) -> list[dict]:
     return [_view(msg, 800) for msg in _messages(narrow, TOPIC_LIMIT)]
 
 
+def check() -> str:
+    return f"{_get('/users/me', {})['full_name']} としてつながりました"
+
+
 ZULIP = Source(
     id="zulip",
     label="Zulip",
     tools=[search_zulip, get_zulip_topic],
     configured=all(os.environ.get(k) for k in ("ZULIP_URL", "ZULIP_EMAIL", "ZULIP_API_KEY")),
+    requires="ZULIP_URL, ZULIP_EMAIL, ZULIP_API_KEY",
+    check=check,
 )

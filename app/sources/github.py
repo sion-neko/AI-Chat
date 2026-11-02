@@ -104,9 +104,15 @@ def get_github_issue(repo: str, number: int) -> dict:
     }
 
 
+def check() -> str:
+    return f"{_get('/user')['login']} としてつながりました"
+
+
 GITHUB = Source(
     id="github",
     label="GitHub",
     tools=[search_github, get_github_issue],
     configured=bool(os.environ.get("GITHUB_TOKEN")),
+    requires="GITHUB_TOKEN",
+    check=check,
 )

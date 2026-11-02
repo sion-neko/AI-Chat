@@ -7,19 +7,25 @@ API:
   GET    /api/conversations/{id}          会話の中身（ターン単位）
   POST   /api/conversations/{id}/messages {content, sources} 続きの質問をする
   DELETE /api/conversations/{id}
+  POST   /api/turns/{turn_id}/cancel        調査中のターンを中止する（turn_id は start イベントで届く）
   GET    /api/characters                  所長と所員（使えるソースの分）
   PUT    /api/characters/{key}            {name, persona} キャラクターを編集する。key は "director" かソースID
   DELETE /api/characters/{key}            キャラクターを既定に戻す
+  GET    /api/status                      LLMの設定と、すべてのソース（未設定のものも）
+  POST   /api/check                       LLMと設定済みのソースに実際につないでみる
 
 sources は検索に使うソースIDの配列。
 
 質問するPOSTは、進み具合をNDJSON（1行1イベント）で逐次返す。
+  {"type": "start", "turn_id"}                  調査を始めた。中止するときに turn_id を使う
   {"type": "member_start", "source", "agent"}   所員が調査を始めた
   {"type": "tool", "source", "tool", "args"}     所員が検索した
   {"type": "member_done", "report"}             所員が報告した
   {"type": "director_start", "agent"}           所長がまとめ始めた（再調査の後にもう一度来る）
   {"type": "followup", "source", "agent", "instruction"}  所長が所員に再調査を頼んだ（続いて member_start 〜 member_done が来る）
+  {"type": "delta", "text"}                    所長の回答の続き（director_start で書き直しになる）
   {"type": "done", "conversation_id", "turn"}   回答（保存済み）
+  {"type": "cancelled"}                         中止した（何も保存しない。新しい会話なら会話ごと消す）
   {"type": "error", "message"}
 入力の検証で弾くときは、ストリームを始める前に通常のJSONで400を返す。
 """
@@ -30,14 +36,19 @@ import queue
 import re
 import threading
 import traceback
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from app import agent, characters, db, sources
 
 STATIC_DIR = Path(__file__).parent / "static"
-CONTENT_TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript"}
+CONTENT_TYPES = {".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml"}
 TITLE_LENGTH = 40
+
+# 調査中のターン。turn_id → 中止の合図
+RUNNING: dict[str, threading.Event] = {}
 
 
 def config() -> dict:
@@ -56,6 +67,21 @@ def character_list() -> list[dict]:
         member = characters.member(s["id"], s["label"])
         result.append({"key": s["id"], "role": f"{s['label']}の担当", "name": member.name, "persona": member.persona})
     return result
+
+
+def status() -> dict:
+    return {
+        "llm": {"base_url": os.environ["LLM_BASE_URL"], "model": os.environ["LLM_MODEL"]},
+        "sources": sources.status(),
+    }
+
+
+def check() -> dict:
+    """LLMとソースの接続確認を並列に行う。"""
+    with ThreadPoolExecutor() as pool:
+        llm = pool.submit(agent.check_llm)
+        results = dict(zip((s.id for s in sources.ALL_SOURCES), pool.map(sources.check, sources.ALL_SOURCES)))
+        return {"llm": llm.result(), "sources": results}
 
 
 def _character_key(key: str) -> bool:
@@ -104,6 +130,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, db.list_conversations())
         if self.path == "/api/characters":
             return self._send_json(200, character_list())
+        if self.path == "/api/status":
+            return self._send_json(200, status())
         if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
             turns = db.load_turns(m[1])
             if turns is None:
@@ -130,6 +158,12 @@ class Handler(BaseHTTPRequestHandler):
             req = self._read_json()
             selected = sources.resolve(req["sources"])
             return self._stream_turn(m[1], history, req["content"], selected, is_new=False)
+        if self.path == "/api/check":
+            return self._send_json(200, check())
+        if m := re.fullmatch(r"/api/turns/(\w+)/cancel", self.path):
+            if cancel := RUNNING.get(m[1]):
+                cancel.set()
+            return self._send_json(200, {})
         self.send_error(404)
 
     def _put(self):
@@ -158,20 +192,34 @@ class Handler(BaseHTTPRequestHandler):
         所員は並列で動くので、レスポンスへの書き込みはこのスレッドだけで行う。
         """
         events: queue.Queue[dict | None] = queue.Queue()
+        turn_id = uuid.uuid4().hex
+        cancel = RUNNING[turn_id] = threading.Event()
+
+        def emit(event: dict):
+            # 中止されたら、次にイベントを出そうとしたところで調査を止める
+            if cancel.is_set():
+                raise agent.Cancelled
+            events.put(event)
 
         def work():
             try:
-                turn = agent.run_turn(history, question, selected, events.put)
+                turn = agent.run_turn(history, question, selected, emit)
                 db.append_turns(conv_id, [{"role": "user", "content": question}, turn])
                 events.put({"type": "done", "conversation_id": conv_id, "turn": turn})
+            except agent.Cancelled:
+                if is_new:
+                    db.delete_conversation(conv_id)
+                events.put({"type": "cancelled"})
             except Exception as e:
                 traceback.print_exc()
                 if is_new:
                     db.delete_conversation(conv_id)
                 events.put({"type": "error", "message": f"{type(e).__name__}: {e}"})
             finally:
+                RUNNING.pop(turn_id, None)
                 events.put(None)
 
+        events.put({"type": "start", "turn_id": turn_id})
         threading.Thread(target=work, daemon=True).start()
 
         # Content-Length を付けず、書き終えたら接続を閉じる（HTTP/1.0）

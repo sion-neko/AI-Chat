@@ -26,6 +26,9 @@ class FakeLLM:
         bound.parent = self
         return bound
 
+    def stream(self, messages):
+        yield self.invoke(messages)
+
     def invoke(self, messages):
         names = [t["function"]["name"] if isinstance(t, dict) else t.name for t in self.tools]
         last = messages[-1]
@@ -76,7 +79,18 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(llm.director_calls, agent.FOLLOWUP_ROUNDS + 1)
         types = [e["type"] for e in self.events]
         self.assertEqual(types.count("followup"), 1)
-        self.assertEqual(types[-1], "director_start")
+        # 再調査の後にもう一度まとめ始め、回答が流れてくる
+        self.assertEqual(types[-2:], ["director_start", "delta"])
+        self.assertEqual(self.events[-1]["text"], "回答")
+
+    def test_cancel_stops_whole_turn(self):
+        def emit(event):
+            if event["type"] == "tool":
+                raise agent.Cancelled
+
+        # 所員の中で投げられても、所員の調査失敗にならずターン全体が止まる
+        with mock.patch.object(agent, "_llm", FakeLLM([])), self.assertRaises(agent.Cancelled):
+            agent.run_turn([], "ディスク", [dummy.CHAT, dummy.WIKI], emit)
 
 
 if __name__ == "__main__":

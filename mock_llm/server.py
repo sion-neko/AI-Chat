@@ -5,12 +5,13 @@
 - 所長に再調査のツールが渡され、質問に「再調査」が含まれていれば、全所員に再調査を頼む
 - 直前がツール結果なら、その結果を要約したことにして最終回答を返す
 - ツールなしで呼ばれたら、受け取った内容をそのまま返す
+- stream: true なら、同じ内容を少しずつSSEで返す（画面で逐次表示を確かめられるよう、間を置く）
 """
 
 import json
 import time
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 def _completion(model: str, message: dict, finish_reason: str) -> dict:
@@ -51,12 +52,40 @@ def respond(req: dict) -> dict:
     return _completion(model, {"role": "assistant", "content": content}, "stop")
 
 
+def chunks(completion: dict):
+    """1回分の応答を、ストリーミングのチャンク（chat.completion.chunk）に分ける。"""
+    choice = completion["choices"][0]
+    message = choice["message"]
+    base = {k: completion[k] for k in ("id", "created", "model")} | {"object": "chat.completion.chunk"}
+
+    def chunk(delta: dict, finish_reason=None) -> dict:
+        return base | {"choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+
+    yield chunk({"role": "assistant", "content": ""})
+    for i, call in enumerate(message.get("tool_calls") or []):
+        yield chunk({"tool_calls": [{"index": i, **call}]})
+    content = message.get("content") or ""
+    for start in range(0, len(content), 12):
+        yield chunk({"content": content[start : start + 12]})
+    yield chunk({}, choice["finish_reason"])
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.path.endswith("/chat/completions"):
             self.send_error(404)
             return
         req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if req.get("stream"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for c in chunks(respond(req)):
+                self.wfile.write(f"data: {json.dumps(c, ensure_ascii=False)}\n\n".encode())
+                self.wfile.flush()
+                time.sleep(0.03)
+            self.wfile.write(b"data: [DONE]\n\n")
+            return
         body = json.dumps(respond(req), ensure_ascii=False).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -66,4 +95,4 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
