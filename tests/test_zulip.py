@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest import mock
 
-from app.sources import zulip
+from app.sources import scope, zulip
 from tests.fake_api import FakeApi
 
 
@@ -52,6 +52,19 @@ class ZulipTest(unittest.TestCase):
             stream["url"],
             f"{self.api.url}/#narrow/stream/5-infra.2Eops/topic/.E3.83.87.E3.82.A3.E3.82.B9.E3.82.AF.20.28.E7.9B.A3.E8.A6.96.29/near/2",
         )
+
+    def test_selected_channels(self):
+        scope.set(["infra.ops", "infra.dev"])
+        self.addCleanup(scope.set, None)
+        zulip.search_zulip.invoke({"query": "ディスク"})
+        channels = [json.loads(r["params"]["narrow"])[1]["operand"] for r in self.api.requests]
+        self.assertEqual(channels, ["infra.ops", "infra.dev"])
+
+    def test_channel_outside_scope(self):
+        scope.set(["infra.ops"])
+        self.addCleanup(scope.set, None)
+        with self.assertRaisesRegex(Exception, "検索範囲の外"):
+            zulip.search_zulip.invoke({"query": "x", "channel": "general"})
 
     def test_topic_oldest_first(self):
         results = zulip.get_zulip_topic.invoke({"channel": "infra.ops", "topic": "ディスク (監視)"})

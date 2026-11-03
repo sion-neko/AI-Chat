@@ -4,6 +4,9 @@
   user:      {"role": "user", "content": ...}
   assistant: {"role": "assistant", "agent", "content", "model", "reports": [所員の報告（検索の過程も含む）]}
              再調査の報告は request（所長からの依頼）を持ち、最初の報告の後ろに並ぶ
+             links: [{"url", "found"}] 回答のリンクが検索結果にあったか（app/links.py）
+             seconds, llm_calls: かかった時間とLLMの呼び出し回数
+             trace_id: LLMとのやりとりの記録（traces テーブル。プロンプトを丸ごと含み大きいので分けて持つ）
 """
 
 import json
@@ -28,6 +31,11 @@ CREATE TABLE IF NOT EXISTS turns (
     data            TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS turns_conversation ON turns(conversation_id, id);
+CREATE TABLE IF NOT EXISTS traces (
+    id              TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    data            TEXT NOT NULL
+);
 -- 画面で編集したキャラクター。key は "director" かソースID。ない場合はコードの既定値を使う
 CREATE TABLE IF NOT EXISTS characters (
     key     TEXT PRIMARY KEY,
@@ -94,6 +102,19 @@ def append_turns(conv_id: str, turns: list[dict]):
             [(conv_id, json.dumps(t, ensure_ascii=False)) for t in turns],
         )
         conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (_now(), conv_id))
+
+
+def save_trace(conv_id: str, calls: list[dict]) -> str:
+    trace_id = uuid.uuid4().hex
+    with connect() as conn:
+        conn.execute("INSERT INTO traces VALUES (?, ?, ?)", (trace_id, conv_id, json.dumps(calls, ensure_ascii=False)))
+    return trace_id
+
+
+def load_trace(trace_id: str) -> list[dict] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT data FROM traces WHERE id = ?", (trace_id,)).fetchone()
+        return json.loads(row["data"]) if row else None
 
 
 def load_characters() -> dict[str, dict]:

@@ -5,16 +5,18 @@ API:
   GET    /api/conversations               会話一覧
   POST   /api/conversations               {content, sources} 新しい会話を作って最初の質問をする
   GET    /api/conversations/{id}          会話の中身（ターン単位）
+  GET    /api/traces/{trace_id}           1ターン分のLLMとのやりとり
   POST   /api/conversations/{id}/messages {content, sources} 続きの質問をする
   DELETE /api/conversations/{id}
   POST   /api/turns/{turn_id}/cancel        調査中のターンを中止する（turn_id は start イベントで届く）
   GET    /api/characters                  所長と所員（使えるソースの分）
   PUT    /api/characters/{key}            {name, persona} キャラクターを編集する。key は "director" かソースID
   DELETE /api/characters/{key}            キャラクターを既定に戻す
+  GET    /api/sources/{id}/scopes         そのソースで選べる検索範囲（リポジトリやチャンネル）
   GET    /api/status                      LLMの設定と、すべてのソース（未設定のものも）
   POST   /api/check                       LLMと設定済みのソースに実際につないでみる
 
-sources は検索に使うソースIDの配列。
+sources は検索に使うソースIDの配列。scopes は {ソースID: [リポジトリやチャンネルの名前]}（省略可。ないソースは絞らない）。
 
 質問するPOSTは、進み具合をNDJSON（1行1イベント）で逐次返す。
   {"type": "start", "turn_id"}                  調査を始めた。中止するときに turn_id を使う
@@ -130,6 +132,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, db.list_conversations())
         if self.path == "/api/characters":
             return self._send_json(200, character_list())
+        if m := re.fullmatch(r"/api/sources/(\w+)/scopes", self.path):
+            return self._send_json(200, sources.scope_choices(m[1]))
         if self.path == "/api/status":
             return self._send_json(200, status())
         if m := re.fullmatch(r"/api/conversations/(\w+)", self.path):
@@ -137,6 +141,11 @@ class Handler(BaseHTTPRequestHandler):
             if turns is None:
                 return self._send_json(404, {"error": "not found"})
             return self._send_json(200, {"id": m[1], "turns": turns})
+        if m := re.fullmatch(r"/api/traces/(\w+)", self.path):
+            trace = db.load_trace(m[1])
+            if trace is None:
+                return self._send_json(404, {"error": "not found"})
+            return self._send_json(200, trace)
 
         name = "index.html" if self.path == "/" else self.path.removeprefix("/static/")
         path = (STATIC_DIR / name).resolve()
@@ -149,15 +158,17 @@ class Handler(BaseHTTPRequestHandler):
             req = self._read_json()
             # 会話を作る前に検証する（使えないソースで空の会話が残らないように）
             selected = sources.resolve(req["sources"])
+            scopes = sources.resolve_scopes(selected, req.get("scopes") or {})
             conv_id = db.create_conversation(req["content"][:TITLE_LENGTH])
-            return self._stream_turn(conv_id, [], req["content"], selected, is_new=True)
+            return self._stream_turn(conv_id, [], req["content"], selected, scopes, is_new=True)
         if m := re.fullmatch(r"/api/conversations/(\w+)/messages", self.path):
             history = db.load_turns(m[1])
             if history is None:
                 return self._send_json(404, {"error": "not found"})
             req = self._read_json()
             selected = sources.resolve(req["sources"])
-            return self._stream_turn(m[1], history, req["content"], selected, is_new=False)
+            scopes = sources.resolve_scopes(selected, req.get("scopes") or {})
+            return self._stream_turn(m[1], history, req["content"], selected, scopes, is_new=False)
         if self.path == "/api/check":
             return self._send_json(200, check())
         if m := re.fullmatch(r"/api/turns/(\w+)/cancel", self.path):
@@ -186,7 +197,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(200, character_list())
         self.send_error(404)
 
-    def _stream_turn(self, conv_id: str, history: list[dict], question: str, selected: list[sources.Source], is_new: bool):
+    def _stream_turn(
+        self,
+        conv_id: str,
+        history: list[dict],
+        question: str,
+        selected: list[sources.Source],
+        scopes: dict[str, list[str]],
+        is_new: bool,
+    ):
         """調査を別スレッドで走らせ、キューに溜まったイベントを1行ずつ書き出す。
 
         所員は並列で動くので、レスポンスへの書き込みはこのスレッドだけで行う。
@@ -203,7 +222,8 @@ class Handler(BaseHTTPRequestHandler):
 
         def work():
             try:
-                turn = agent.run_turn(history, question, selected, emit)
+                turn = agent.run_turn(history, question, selected, emit, scopes)
+                turn["trace_id"] = db.save_trace(conv_id, turn.pop("trace"))
                 db.append_turns(conv_id, [{"role": "user", "content": question}, turn])
                 events.put({"type": "done", "conversation_id": conv_id, "turn": turn})
             except agent.Cancelled:

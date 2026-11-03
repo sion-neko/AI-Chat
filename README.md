@@ -39,6 +39,8 @@ Pythonを変更したら `docker compose restart agent`。
 
 画面の「接続確認」で、LLMと各ソースに実際につながるかを確かめられる。
 
+GitHub・GitLab・Zulip は、入力欄のソースの横の「▾」から、調べるリポジトリ・プロジェクト・チャンネルを質問ごとに選べる（選んだ内容はブラウザに残る）。選ぶと `.env` の `GITHUB_SCOPE` や `GITLAB_GROUP` より優先する。何も選ばなければ `.env` の設定どおりに調べる。
+
 ### MCPサーバーを足す
 
 `data/mcp.json` に書いたMCPサーバーが、1つずつ所員の担当ソースになる（書き方は Claude Desktop などと同じ `mcpServers` の形）。
