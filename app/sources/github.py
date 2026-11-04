@@ -7,10 +7,11 @@
 """
 
 import os
+import urllib.parse
 
 from langchain_core.tools import tool
 
-from app.sources import http
+from app.sources import http, scope
 from app.sources.base import Source
 
 API_URL = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
@@ -49,7 +50,10 @@ def search_github(query: str, since: str | None = None, until: str | None = None
     state: "open" か "closed"。省略すると両方
     新しく更新された順に最大20件。本文は先頭だけなので、詳しくは get_github_issue で読む。
     """
-    terms = [query, os.environ.get("GITHUB_SCOPE", "")]
+    since = scope.since(since)  # 続報を調べるときは、前回の調査より前を探さない
+    # 画面で選んだリポジトリがあれば、.env の GITHUB_SCOPE の代わりにそれで絞る
+    repos = scope.get()
+    terms = [query, " ".join(f"repo:{r}" for r in repos) if repos else os.environ.get("GITHUB_SCOPE", "")]
     if updated := _date_range(since, until):
         terms.append(f"updated:{updated}")
     if state:
@@ -104,9 +108,35 @@ def get_github_issue(repo: str, number: int) -> dict:
     }
 
 
+def check() -> str:
+    return f"{_get('/user')['login']} としてつながりました"
+
+
+def scopes() -> list[str]:
+    """トークンで見られるリポジトリ（最近更新された順に100件）。"""
+    return [r["full_name"] for r in _get("/user/repos", {"sort": "pushed", "per_page": 100})]
+
+
+# Issue等に貼られた画像の置き場所。トークンを付けて取りに行くのはここだけ（よそのサーバーにトークンを渡さない）
+IMAGE_HOSTS = {"github.com", "user-images.githubusercontent.com", "private-user-images.githubusercontent.com"}
+
+
+def fetch_image(url: str) -> tuple[bytes, str]:
+    """Issue・Pull Requestに貼られた画像を取ってくる（非公開リポジトリの画像はトークンが要る）。"""
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if host not in IMAGE_HOSTS | {urllib.parse.urlsplit(API_URL).hostname}:
+        raise http.ApiError("GitHubに貼られた画像のURLではありません")
+    return http.get_image(url, {"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}"})
+
+
 GITHUB = Source(
     id="github",
     label="GitHub",
     tools=[search_github, get_github_issue],
     configured=bool(os.environ.get("GITHUB_TOKEN")),
+    requires="GITHUB_TOKEN",
+    check=check,
+    scopes=scopes,
+    scope_label="リポジトリ",
+    fetch_image=fetch_image,
 )

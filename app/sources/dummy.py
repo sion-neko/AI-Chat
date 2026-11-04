@@ -1,4 +1,7 @@
-"""動作確認用のダミーソース。架空のメッセージを返すだけで、外部には一切つながらない。"""
+"""お試し用のサンプルソース。架空のメッセージを返すだけで、外部には一切つながらない。
+
+ほかのソースを1つも設定していないときだけ使う（app/sources/__init__.py の usable）。
+"""
 
 from langchain_core.tools import tool
 
@@ -46,5 +49,5 @@ def search_dummy_wiki(query: str) -> list[dict]:
     return _search(_WIKI_PAGES, query)
 
 
-CHAT = Source(id="dummy_chat", label="ダミーチャット", tools=[search_dummy_chat], configured=True)
-WIKI = Source(id="dummy_wiki", label="ダミーWiki", tools=[search_dummy_wiki], configured=True)
+CHAT = Source(id="dummy_chat", label="サンプルチャット", tools=[search_dummy_chat], configured=True)
+WIKI = Source(id="dummy_wiki", label="サンプルWiki", tools=[search_dummy_wiki], configured=True)

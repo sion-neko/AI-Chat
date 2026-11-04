@@ -1,0 +1,24 @@
+{
+  "_説明": "モデルごとにできること。LLM_MODEL を上から順に match（* は任意の文字列。大文字小文字は区別しない）と照らし、最初に合ったものを使う。どれにも合わなければ、できないものとして扱う。vision: 画像を読めるか",
+  "models": [
+    { "match": "mock", "vision": true },
+    { "match": "gpt-4o*", "vision": true },
+    { "match": "gpt-4.1*", "vision": true },
+    { "match": "gpt-5*", "vision": true },
+    { "match": "gpt-6*", "vision": true },
+    { "match": "*claude*", "vision": true },
+    { "match": "*gemini*", "vision": true },
+    { "match": "*qwen*vl*", "vision": true },
+    { "match": "*qwen*omni*", "vision": true },
+    { "match": "*gemma-3*", "vision": true },
+    { "match": "*gemma3*", "vision": true },
+    { "match": "*llama-4*", "vision": true },
+    { "match": "*llama4*", "vision": true },
+    { "match": "*llava*", "vision": true },
+    { "match": "*pixtral*", "vision": true },
+    { "match": "*mistral-small-3*", "vision": true },
+    { "match": "*internvl*", "vision": true },
+    { "match": "*minicpm-v*", "vision": true },
+    { "match": "*", "vision": false }
+  ]
+}

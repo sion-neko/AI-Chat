@@ -7,12 +7,13 @@
 """
 
 import os
+import re
 import urllib.parse
 from typing import Literal
 
 from langchain_core.tools import tool
 
-from app.sources import http
+from app.sources import http, scope
 from app.sources.base import Source
 
 SEARCH_LIMIT = 20
@@ -30,7 +31,18 @@ def _quote(path: str) -> str:
     return urllib.parse.quote(path, safe="")
 
 
+def _absolute_uploads(text: str | None, project_url: str) -> str:
+    """本文に貼られた画像は「/uploads/...」とプロジェクトからの相対URLで書かれるので、どこの画像か分かる形にする。"""
+    return re.sub(r"\]\(/uploads/", f"]({project_url}/uploads/", text or "")
+
+
+def _project_url(web_url: str) -> str:
+    """IssueやMRのURL（.../infra/tools/-/issues/3）から、プロジェクトのURLを取り出す。"""
+    return web_url.split("/-/", 1)[0]
+
+
 def _summary(item: dict, kind: str, body_limit: int) -> dict:
+    item = {**item, "description": _absolute_uploads(item.get("description"), _project_url(item["web_url"]))}
     return {
         "kind": kind,
         "ref": item["references"]["full"],
@@ -53,11 +65,16 @@ def search_gitlab(query: str, since: str | None = None, until: str | None = None
     state: "opened" / "closed" / "merged"（mergedはMerge Requestだけ）。省略するとすべて
     新しく更新された順に最大20件。本文は先頭だけなので、詳しくは get_gitlab_item で読む。
     """
+    since = scope.since(since)  # 続報を調べるときは、前回の調査より前を探さない
+    # 画面で選んだプロジェクトがあればそれぞれで検索する。なければ .env の GITLAB_GROUP か、見られる全体
     group = os.environ.get("GITLAB_GROUP")
-    prefix = f"/groups/{_quote(group)}" if group else ""
+    if projects := scope.get():
+        prefixes = [f"/projects/{_quote(p)}" for p in projects]
+    else:
+        prefixes = [f"/groups/{_quote(group)}" if group else ""]
     params = {
         "search": query,
-        "scope": None if group else "all",
+        "scope": None if (projects or group) else "all",
         "updated_after": f"{since}T00:00:00Z" if since else None,
         "updated_before": f"{until}T23:59:59Z" if until else None,
         "state": state,
@@ -65,10 +82,11 @@ def search_gitlab(query: str, since: str | None = None, until: str | None = None
         "per_page": SEARCH_LIMIT,
     }
     results = []
-    for kind, resource in KINDS.items():
-        if kind == "issue" and state == "merged":
-            continue
-        results += [_summary(item, kind, 300) for item in _get(f"{prefix}/{resource}", params)]
+    for prefix in prefixes:
+        for kind, resource in KINDS.items():
+            if kind == "issue" and state == "merged":
+                continue
+            results += [_summary(item, kind, 300) for item in _get(f"{prefix}/{resource}", params)]
     results.sort(key=lambda r: r["updated_at"], reverse=True)
     return results[:SEARCH_LIMIT]
 
@@ -90,11 +108,38 @@ def get_gitlab_item(project: str, iid: int, kind: Literal["issue", "merge_reques
             "author": (n.get("author") or {}).get("username"),
             "created_at": n["created_at"],
             "system": n.get("system", False),
-            "body": http.clip(n.get("body"), 1000),
+            "body": http.clip(_absolute_uploads(n.get("body"), _project_url(item["url"])), 1000),
         }
         for n in notes
     ]
     return item
+
+
+def check() -> str:
+    return f"{_get('/user')['username']} としてつながりました"
+
+
+def scopes() -> list[str]:
+    """自分が参加しているプロジェクト（GITLAB_GROUP があればその中）。最近動きがあった順に100件。"""
+    params = {"simple": "true", "order_by": "last_activity_at", "per_page": 100}
+    if group := os.environ.get("GITLAB_GROUP"):
+        projects = _get(f"/groups/{_quote(group)}/projects", {**params, "include_subgroups": "true"})
+    else:
+        projects = _get("/projects", {**params, "membership": "true"})
+    return [p["path_with_namespace"] for p in projects]
+
+
+def fetch_image(url: str) -> tuple[bytes, str]:
+    """Issue・MRに貼られた画像（プロジェクト/uploads/秘密の文字列/ファイル名）を、APIから取ってくる。
+
+    画面用のURLはトークンでは開けないので、同じファイルをAPI（GitLab 17.4以降）で取る。
+    """
+    base = os.environ["GITLAB_URL"].rstrip("/")
+    m = re.fullmatch(rf"{re.escape(base)}/(?P<project>.+?)(?:/-)?/uploads/(?P<secret>[0-9a-f]{{32}})/(?P<name>[^/?#]+)", url)
+    if not m:
+        raise http.ApiError("GitLabに貼られた画像（…/uploads/… のURL）ではありません")
+    api_url = f"{base}/api/v4/projects/{_quote(m['project'])}/uploads/{m['secret']}/{m['name']}"
+    return http.get_image(api_url, {"PRIVATE-TOKEN": os.environ["GITLAB_TOKEN"]})
 
 
 GITLAB = Source(
@@ -102,4 +147,9 @@ GITLAB = Source(
     label="GitLab",
     tools=[search_gitlab, get_gitlab_item],
     configured=bool(os.environ.get("GITLAB_URL") and os.environ.get("GITLAB_TOKEN")),
+    requires="GITLAB_URL, GITLAB_TOKEN",
+    check=check,
+    scopes=scopes,
+    scope_label="プロジェクト",
+    fetch_image=fetch_image,
 )

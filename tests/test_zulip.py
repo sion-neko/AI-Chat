@@ -4,8 +4,8 @@ import unittest
 from datetime import datetime, timezone
 from unittest import mock
 
-from app.sources import zulip
-from tests.fake_api import FakeApi
+from app.sources import scope, zulip
+from tests.fake_api import FakeApi, Raw
 
 
 def message(id, day, content, **extra):
@@ -52,6 +52,32 @@ class ZulipTest(unittest.TestCase):
             stream["url"],
             f"{self.api.url}/#narrow/stream/5-infra.2Eops/topic/.E3.83.87.E3.82.A3.E3.82.B9.E3.82.AF.20.28.E7.9B.A3.E8.A6.96.29/near/2",
         )
+
+    def test_selected_channels(self):
+        scope.set(["infra.ops", "infra.dev"])
+        self.addCleanup(scope.set, None)
+        zulip.search_zulip.invoke({"query": "ディスク"})
+        channels = [json.loads(r["params"]["narrow"])[1]["operand"] for r in self.api.requests]
+        self.assertEqual(channels, ["infra.ops", "infra.dev"])
+
+    def test_channel_outside_scope(self):
+        scope.set(["infra.ops"])
+        self.addCleanup(scope.set, None)
+        with self.assertRaisesRegex(Exception, "検索範囲の外"):
+            zulip.search_zulip.invoke({"query": "x", "channel": "general"})
+
+    def test_fetch_image_via_temporary_url(self):
+        self.api.routes["/api/v1/user_uploads/2/ab/graph.png"] = {"url": "/user_uploads/temporary/xyz/graph.png"}
+        self.api.routes["/user_uploads/temporary/xyz/graph.png"] = Raw(b"\x89PNG", "image/png")
+        for url in ("/user_uploads/2/ab/graph.png", f"{self.api.url}/user_uploads/2/ab/graph.png"):
+            self.assertEqual(zulip.fetch_image(url), (b"\x89PNG", "image/png"))
+        # 一時的なURLをもらうときだけ認証する
+        self.assertIn("authorization", self.api.requests[0]["headers"])
+        self.assertNotIn("authorization", self.api.requests[1]["headers"])
+
+    def test_fetch_image_only_uploads(self):
+        with self.assertRaisesRegex(Exception, "user_uploads"):
+            zulip.fetch_image("https://example.com/x.png")
 
     def test_topic_oldest_first(self):
         results = zulip.get_zulip_topic.invoke({"channel": "infra.ops", "topic": "ディスク (監視)"})
