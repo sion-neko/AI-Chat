@@ -1,6 +1,7 @@
 """所長と所員によるチーム調査。
 
 1ターンの流れ:
+  0. 所長が依頼を受け付ける。何の話か特定できないほど曖昧なら、調べずに聞き返してターンを終える
   1. 選ばれたソースごとに所員（LangGraphのツールループ）を並列で走らせる
      所員に渡すのはユーザーの質問だけ。他の所員の結果や過去の回答は見せない
   2. 所長が所員の報告を読む。足りなければ所員に再調査を頼める（FOLLOWUP_ROUNDS 回まで）
@@ -91,6 +92,16 @@ DIRECTOR_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name
 - どの所員も見つけられなかった場合は、そう伝える
 - 報告では答えきれないとき（結末が分からない、報告どうしが食い違う、検索語や期間の見落としがありそう等）は、
   request_reinvestigation で所員に再調査を頼める。頼むのは本当に必要なときだけにし、何をどう調べ直すかを具体的に書く"""
+
+INTAKE_PROMPT = """あなたは「おばけ探偵事務所」の所長「{name}」です。{persona}
+依頼人の質問を受け付け、所員に調べさせる前に、聞き返す必要があるかを判断します。今日は {today} です。
+所員はチャットやIssueなどを検索して調べます。
+
+- 何の話か特定できず、検索語すら決められないときだけ、ask_user で依頼人に1つだけ聞き返す
+  （例:「あの件どうなった？」だけで、これまでのやりとりからも何の件か分からない）
+- 少しでも手がかり（固有名詞・システム名・時期など）があれば聞き返さない。所員が調べて絞り込める
+- 聞き返すときは、答えやすいよう候補や例を添える
+- 聞き返さないときは、何も呼ばずに「調査します」とだけ答える"""
 
 _llm = ChatOpenAI(
     base_url=os.environ["LLM_BASE_URL"],
@@ -231,9 +242,7 @@ def run_director(
     history は過去のターン（質問と所長の回答）。返り値の followups は再調査で増えた報告。
     """
     prompt = DIRECTOR_PROMPT.format(name=director.name, persona=director.persona, today=date.today())
-    messages = [SystemMessage(prompt)]
-    for turn in history:
-        messages.append(HumanMessage(turn["content"]) if turn["role"] == "user" else AIMessage(turn["content"]))
+    messages = [SystemMessage(prompt), *_history_messages(history)]
 
     sections = [f"### {r['agent']}（{r['label']}、ソースID: {r['source']}）\n{_report_text(r)}" for r in reports]
     messages.append(HumanMessage(f"{questions[-1]}\n\n## 所員の報告\n\n" + "\n\n".join(sections)))
@@ -283,26 +292,97 @@ def check_llm() -> dict:
     return {"state": "ok", "message": f"{model} が応答しました"}
 
 
+ASK_USER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "ask_user",
+        "description": "調べ始める前に、依頼人に1つだけ聞き返す",
+        "parameters": {
+            "type": "object",
+            "properties": {"question": {"type": "string", "description": "依頼人への質問（候補や例を添える）"}},
+            "required": ["question"],
+        },
+    },
+}
+
+
+def _history_messages(history: list[dict]) -> list:
+    return [HumanMessage(t["content"]) if t["role"] == "user" else AIMessage(t["content"]) for t in history]
+
+
+def intake(director: characters.Character, history: list[dict], question: str, trace: Trace) -> dict | None:
+    """聞き返すべきなら {"question": 依頼人への質問, "model": 応答したモデル} を返す。調べてよければ None。
+
+    受付は補助なので、LLMの呼び出しに失敗しても調査は止めない（None を返す）。
+    """
+    prompt = INTAKE_PROMPT.format(name=director.name, persona=director.persona, today=date.today())
+    messages = [SystemMessage(prompt), *_history_messages(history), HumanMessage(question)]
+    started = time.monotonic()
+    try:
+        answer = _llm.bind_tools([ASK_USER_TOOL]).invoke(messages)
+    except Exception:
+        return None
+    trace.record(f"{director.name}所長（受付）", messages, [ASK_USER_TOOL], answer, time.monotonic() - started)
+    for call in answer.tool_calls:
+        if call["name"] == "ask_user" and str(call["args"].get("question", "")).strip():
+            model = answer.response_metadata.get("model_name") or os.environ.get("LLM_MODEL", "")
+            return {"question": call["args"]["question"].strip(), "model": model}
+    return None
+
+
+def member_questions(history: list[dict], question: str) -> list[str]:
+    """所員に渡す、これまでの質問。所長が聞き返した後の答えには、その確認を添える。"""
+    questions = []
+    for i, t in enumerate([*history, {"role": "user", "content": question}]):
+        if t["role"] != "user":
+            continue
+        previous = history[i - 1] if 0 < i <= len(history) else None
+        if previous and previous.get("kind") == "clarify":
+            questions.append(f"{t['content']}（所長の確認「{previous['content']}」への答え）")
+        else:
+            questions.append(t["content"])
+    return questions
+
+
 def run_turn(
     history: list[dict],
     question: str,
     sources: list[Source],
     emit: Emit,
     scopes: dict[str, list[str]] | None = None,
+    clarify: bool = True,
 ) -> dict:
     """1ターン分の調査と回答。返り値は保存・表示用の assistant ターン。
 
     scopes はソースIDごとの検索範囲。書かれていないソースは絞らない。
+    clarify が False なら聞き返さない（依頼人が「聞き返さずに調べる」を選んだとき）。
+    直前に聞き返したばかりのときも、続けては聞き返さない。
+    聞き返したときは kind: "clarify" のターンを返す（reports などは持たない）。
 
     trace（LLMとのやりとり）は大きいので、保存する側が会話とは分けて保存する。
     """
     started = time.monotonic()
     trace = Trace()
-    questions = [t["content"] for t in history if t["role"] == "user"] + [question]
+    director = characters.director()
+
+    if clarify and not (history and history[-1].get("kind") == "clarify"):
+        emit({"type": "intake_start", "agent": director.name})
+        if ask := intake(director, history, question, trace):
+            return {
+                "role": "assistant",
+                "kind": "clarify",
+                "agent": director.name,
+                "content": ask["question"],
+                "model": ask["model"],
+                "seconds": round(time.monotonic() - started, 2),
+                "llm_calls": len(trace.calls),
+                "trace": trace.calls,
+            }
+
+    questions = member_questions(history, question)
     with ThreadPoolExecutor(max_workers=len(sources)) as pool:
         reports = list(pool.map(lambda s: run_member(s, questions, emit, trace, (scopes or {}).get(s.id)), sources))
 
-    director = characters.director()
     emit({"type": "director_start", "agent": director.name})
     answer = run_director(director, history, questions, reports, sources, emit, trace)
     reports += answer.pop("followups")

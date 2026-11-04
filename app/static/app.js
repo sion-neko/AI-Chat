@@ -1,7 +1,13 @@
 // 表示中の会話ID。null は「新しい会話」（最初の送信でサーバー側に作られる）
 let currentId = null;
-// 会話の一覧（検索で絞り込むために持っておく）
+// 会話の一覧（今の検索とアーカイブの表示に合うもの）
 let conversations = [];
+// アーカイブした会話を見ているか
+let showingArchive = false;
+// 開いている会話。検索で一覧から外れても、名前やタグを出せるように持っておく
+let openedConversation = null;
+// 開いている会話に保存されているターンの数（次の質問の位置）
+let turnCount = 0;
 // 所長の名前（回答の見出しに使う）と、ソースIDから画面の名前への対応
 let directorName = "所長";
 let sourceLabels = new Map();
@@ -10,6 +16,8 @@ const log = document.getElementById("log");
 const list = document.getElementById("conversations");
 const search = document.getElementById("search");
 const titleEl = document.getElementById("conversation-title");
+const tagsEl = document.getElementById("conversation-tags");
+const archiveButton = document.getElementById("archive");
 const form = document.getElementById("form");
 const input = document.getElementById("input");
 const send = document.getElementById("send");
@@ -42,7 +50,26 @@ document.getElementById("new-chat").addEventListener("click", () => {
   input.focus();
 });
 
-search.addEventListener("input", renderList);
+// 打つたびにサーバーで探す（中身まで探すので、打ち終わるのを少し待つ）
+let searchTimer = null;
+search.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(refreshList, 250);
+});
+document.getElementById("toggle-archive").addEventListener("click", (e) => {
+  showingArchive = !showingArchive;
+  e.currentTarget.textContent = showingArchive ? "通常の一覧に戻る" : "アーカイブを見る";
+  document.querySelector(".sidebar").classList.toggle("archive-mode", showingArchive);
+  refreshList();
+});
+archiveButton.addEventListener("click", async () => {
+  const c = currentConversation();
+  await api("PATCH", `/api/conversations/${c.id}`, { archived: !c.archived });
+  c.archived = !c.archived;
+  renderHead();
+  await refreshList();
+});
+titleEl.addEventListener("click", renameConversation);
 sourceBox.addEventListener("change", saveSourceSelection);
 
 document.getElementById("open-characters").addEventListener("click", async () => {
@@ -84,19 +111,29 @@ input.addEventListener("keydown", (e) => {
 // 調査中のターン。調査中は送信ボタンが中止ボタンになる
 let running = null; // { turnId, cancelling }
 
-form.addEventListener("submit", async (e) => {
+form.addEventListener("submit", (e) => {
   e.preventDefault();
   if (running) return cancelTurn();
   const content = input.value.trim();
   if (!content) return;
-
-  if (document.getElementById("empty")) {
-    log.replaceChildren();
-    titleEl.textContent = content;
-  }
-  const turn = append(turnView(content));
   input.value = "";
   autosize();
+  ask(content, null);
+});
+
+// 質問して調査させる。fromTurn（質問のターンの位置）があれば、そこから後をやり直す
+// skipClarify なら所長は聞き返さずに調べる
+async function ask(content, fromTurn, skipClarify = false) {
+  if (document.getElementById("empty")) {
+    log.replaceChildren();
+    renderHead({ title: content, tags: [] });
+  }
+  if (fromTurn !== null) {
+    // やり直す質問と、それより後のやりとりを画面から外す（失敗したら開き直して元に戻す）
+    for (const node of [...log.querySelectorAll(".turn")].filter((n) => Number(n.dataset.index) >= fromTurn)) node.remove();
+  }
+  const index = fromTurn ?? turnCount;
+  const turn = append(turnView(content, index));
 
   const progress = progressView();
   turn.append(progress.node);
@@ -104,8 +141,11 @@ form.addEventListener("submit", async (e) => {
   setSendButton();
   try {
     const path = currentId ? `/api/conversations/${currentId}/messages` : "/api/conversations";
+    const body = { content, sources: selectedSources(), scopes: selectedScopes };
+    if (fromTurn !== null) body.from_turn = fromTurn;
+    if (skipClarify) body.skip_clarify = true;
     let result = null;
-    await streamTurn(path, { content, sources: selectedSources(), scopes: selectedScopes }, (event) => {
+    await streamTurn(path, body, (event) => {
       if (event.type === "error") throw new Error(event.message);
       if (event.type === "start") running.turnId = event.turn_id;
       else if (event.type === "done" || event.type === "cancelled") result = event;
@@ -116,13 +156,17 @@ form.addEventListener("submit", async (e) => {
       // 何も保存されていないので、質問ごと消して入力欄に戻す
       turn.remove();
       restoreQuestion(content);
-      if (!log.children.length) showEmpty();
+      if (fromTurn !== null) await openConversation(currentId);
+      else if (!log.children.length) showEmpty();
       return;
     }
-    progress.node.replaceWith(answerView(result.turn));
+    progress.node.replaceWith(answerView(result.turn, index));
+    turnCount = index + 2;
+    setPlaceholder(result.turn);
     if (!currentId) {
       currentId = result.conversation_id;
       await refreshList();
+      renderHead();
     }
   } catch (err) {
     progress.node.replaceWith(el("p", "error-text", `調査できませんでした: ${err.message}`));
@@ -132,7 +176,7 @@ form.addEventListener("submit", async (e) => {
     setSendButton();
     input.focus();
   }
-});
+}
 
 async function cancelTurn() {
   if (!running.turnId || running.cancelling) return;
@@ -347,17 +391,24 @@ function labeled(text, control) {
 
 // ---- 会話の一覧 ----
 
+function currentConversation() {
+  return conversations.find((c) => c.id === currentId) ?? openedConversation;
+}
+
 async function openConversation(id) {
   const data = await api("GET", `/api/conversations/${id}`);
   currentId = id;
-  titleEl.textContent = conversations.find((c) => c.id === id)?.title ?? "";
+  openedConversation = conversations.find((c) => c.id === id) ?? null;
+  renderHead();
   const nodes = [];
-  for (const t of data.turns) {
-    if (t.role === "user") nodes.push(turnView(t.content));
-    else nodes.at(-1).append(answerView(t));
-  }
+  data.turns.forEach((t, i) => {
+    if (t.role === "user") nodes.push(turnView(t.content, i));
+    else nodes.at(-1).append(answerView(t, i - 1));
+  });
+  turnCount = data.turns.length;
   log.replaceChildren(...nodes);
   log.scrollTop = log.scrollHeight;
+  setPlaceholder(data.turns.at(-1));
   highlightCurrent();
 }
 
@@ -372,22 +423,26 @@ async function deleteConversation(id) {
 }
 
 async function refreshList() {
-  conversations = await api("GET", "/api/conversations");
+  const params = new URLSearchParams({ q: search.value.trim() });
+  if (showingArchive) params.set("archived", "1");
+  conversations = await api("GET", `/api/conversations?${params}`);
+  if (currentId) openedConversation = conversations.find((c) => c.id === currentId) ?? openedConversation;
   renderList();
 }
 
-// 更新日ごとにまとめて出す。検索語があればタイトルで絞る
+// 更新日ごとにまとめて出す
 function renderList() {
-  const query = search.value.trim().toLowerCase();
-  const shown = conversations.filter((c) => !query || c.title.toLowerCase().includes(query));
   const nodes = [];
   let group = null;
-  for (const c of shown) {
+  for (const c of conversations) {
     const g = dateGroup(c.updated_at);
     if (g !== group) nodes.push(el("div", "conv-group", (group = g)));
     nodes.push(conversationItem(c));
   }
-  if (!shown.length) nodes.push(el("div", "conv-empty", query ? "見つかりませんでした" : "まだ調査はありません"));
+  if (!conversations.length) {
+    const text = search.value.trim() ? "見つかりませんでした" : showingArchive ? "アーカイブした調査はありません" : "まだ調査はありません";
+    nodes.push(el("div", "conv-empty", text));
+  }
   list.replaceChildren(...nodes);
   highlightCurrent();
 }
@@ -405,9 +460,11 @@ function dateGroup(iso) {
 function conversationItem(c) {
   const item = el("div", "conv");
   item.dataset.id = c.id;
-  const title = el("button", "conv-title", c.title);
+  const title = el("button", "conv-title");
   title.type = "button";
   title.title = c.title;
+  title.append(el("span", "conv-name", c.title));
+  for (const tag of c.tags) title.append(el("span", "conv-tag", tag));
   title.addEventListener("click", () => openConversation(c.id));
   const del = el("button", "conv-delete", "×");
   del.type = "button";
@@ -417,6 +474,104 @@ function conversationItem(c) {
   return item;
 }
 
+// ---- 開いている会話の見出し（名前・タグ・アーカイブ） ----
+
+// 新しい会話を送った直後は、まだ一覧にないので draft（仮の名前）を出す
+function renderHead(draft) {
+  const c = draft ? null : currentConversation();
+  titleEl.textContent = c?.title ?? draft?.title ?? "新しい調査";
+  titleEl.classList.toggle("editable", Boolean(c));
+  titleEl.title = c ? "クリックして名前を変える" : "";
+  archiveButton.hidden = !c;
+  archiveButton.textContent = c?.archived ? "アーカイブから戻す" : "アーカイブ";
+  tagsEl.replaceChildren();
+  if (!c) return;
+  for (const tag of c.tags) {
+    const chip = el("span", "tag", tag);
+    const remove = el("button", "tag-remove", "×");
+    remove.type = "button";
+    remove.title = `タグ「${tag}」を外す`;
+    remove.addEventListener("click", () => saveTags(c.tags.filter((t) => t !== tag)));
+    chip.title = `「${tag}」の調査を探す`;
+    chip.addEventListener("click", (e) => {
+      if (e.target === remove) return;
+      search.value = `tag:${tag}`;
+      refreshList();
+    });
+    chip.append(remove);
+    tagsEl.append(chip);
+  }
+  const add = el("button", "tag-add", "＋ タグ");
+  add.type = "button";
+  add.addEventListener("click", () => addTagInput(add, c));
+  tagsEl.append(add);
+}
+
+function addTagInput(button, c) {
+  const field = el("input", "tag-input");
+  field.placeholder = "タグ名";
+  field.maxLength = 20;
+  field.setAttribute("list", "tag-suggestions");
+  // 使ったことのあるタグを候補に出す
+  api("GET", "/api/tags").then((tags) => {
+    const datalist = document.getElementById("tag-suggestions") ?? document.body.appendChild(el("datalist"));
+    datalist.id = "tag-suggestions";
+    datalist.replaceChildren(...tags.filter((t) => !c.tags.includes(t)).map((t) => Object.assign(el("option"), { value: t })));
+  });
+  const done = async (save) => {
+    const tag = field.value.trim();
+    if (save && tag) await saveTags([...c.tags, tag]);
+    else renderHead();
+  };
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) done(true);
+    if (e.key === "Escape") done(false);
+  });
+  field.addEventListener("blur", () => done(Boolean(field.value.trim())));
+  button.replaceWith(field);
+  field.focus();
+}
+
+async function saveTags(tags) {
+  const c = currentConversation();
+  try {
+    await api("PATCH", `/api/conversations/${c.id}`, { tags });
+    c.tags = [...new Set(tags.map((t) => t.trim()).filter(Boolean))];
+  } catch (err) {
+    alert(err.message);
+  }
+  renderHead();
+  renderList();
+}
+
+function renameConversation() {
+  const c = currentConversation();
+  if (!c || titleEl.querySelector("input")) return;
+  const field = el("input", "title-input");
+  field.value = c.title;
+  field.maxLength = 80;
+  const done = async (save) => {
+    const title = field.value.trim();
+    if (save && title && title !== c.title) {
+      await api("PATCH", `/api/conversations/${c.id}`, { title });
+      c.title = title;
+      renderList();
+    }
+    renderHead();
+  };
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) field.blur();
+    if (e.key === "Escape") {
+      field.value = c.title;
+      field.blur();
+    }
+  });
+  field.addEventListener("blur", () => done(true));
+  titleEl.replaceChildren(field);
+  field.focus();
+  field.select();
+}
+
 function highlightCurrent() {
   for (const item of list.querySelectorAll(".conv")) item.classList.toggle("active", item.dataset.id === currentId);
 }
@@ -424,10 +579,68 @@ function highlightCurrent() {
 // ---- 調査と回答 ----
 
 // 1往復分の入れ物。質問を出し、回答はあとから足す
-function turnView(question) {
+// index は質問のターンの位置。やり直すときにサーバーへ渡す
+function turnView(question, index) {
   const node = el("section", "turn");
-  node.append(el("div", "question", question));
+  node.dataset.index = index;
+  const bubble = el("div", "question", question);
+  const edit = el("button", "question-edit", "編集");
+  edit.type = "button";
+  edit.title = "質問を直して調べ直す";
+  edit.addEventListener("click", () => editQuestion(node, question, index));
+  const row = el("div", "question-row");
+  row.append(edit, bubble);
+  node.append(row);
   return node;
+}
+
+// より後のやりとりが消えるときは確かめる
+function confirmRedo(index) {
+  if (index + 2 >= turnCount) return true;
+  return confirm("この質問より後のやりとりは消えます。調べ直しますか？");
+}
+
+function redo(content, index, skipClarify = false) {
+  if (running || !confirmRedo(index)) return;
+  ask(content, index, skipClarify);
+}
+
+// 所長が聞き返しているときは、答えを書く欄だと分かるようにする（元の文言は最初に1度だけ覚える）
+function setPlaceholder(lastTurn) {
+  input.dataset.placeholder ??= input.placeholder;
+  input.placeholder = lastTurn?.kind === "clarify" ? "所長の質問に答える（Enterで送信）" : input.dataset.placeholder;
+}
+
+function editQuestion(node, question, index) {
+  if (running) return;
+  const row = node.querySelector(".question-row");
+  const editor = el("div", "question-editor");
+  const field = el("textarea");
+  field.value = question;
+  field.rows = Math.min(8, question.split("\n").length + 1);
+  const cancel = el("button", "quiet", "やめる");
+  cancel.type = "button";
+  const submit = el("button", "primary", "調べ直す");
+  submit.type = "button";
+  const actions = el("div", "dialog-actions");
+  actions.append(cancel, submit);
+  editor.append(field, actions);
+  row.replaceWith(editor);
+  field.focus();
+  cancel.addEventListener("click", () => editor.replaceWith(row));
+  submit.addEventListener("click", () => {
+    const content = field.value.trim();
+    if (!content) return;
+    if (running || !confirmRedo(index)) return;
+    ask(content, index);
+  });
+  field.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      submit.click();
+    }
+    if (e.key === "Escape") cancel.click();
+  });
 }
 
 // 所長の回答の枠（アイコン・名前・補足）。body に中身を足す
@@ -445,7 +658,24 @@ function answerFrame(agent) {
   return { node, body, meta };
 }
 
-function answerView({ agent, content, model, reports, links, seconds, llm_calls, trace_id }) {
+// 調べる前に所長が聞き返したターン
+function clarifyView({ agent, content }, index) {
+  const { node, body, meta } = answerFrame(agent);
+  meta.replaceChildren(el("span", "pill followup", "確認"));
+  const note = el("div", "clarify-note", "答えを下の入力欄に書いてください。");
+  const skip = el("button", "", "聞き返さずに調べる");
+  skip.type = "button";
+  skip.title = "今の質問のまま、所員に調べさせます";
+  skip.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").querySelector(".question").textContent, index, true));
+  const actions = el("div", "answer-actions");
+  actions.append(skip);
+  body.append(markdownView(content), note, actions);
+  return node;
+}
+
+function answerView(turn, index) {
+  if (turn.kind === "clarify") return clarifyView(turn, index);
+  const { agent, content, model, reports, links, seconds, llm_calls, trace_id } = turn;
   const { node, body, meta } = answerFrame(agent);
   const searches = reports.reduce((n, r) => n + r.steps.length, 0);
   const members = new Set(reports.map((r) => r.source)).size;
@@ -463,34 +693,69 @@ function answerView({ agent, content, model, reports, links, seconds, llm_calls,
   const answer = markdownView(content);
   const actions = el("div", "answer-actions");
   actions.append(copyButton(content));
+  const regenerate = el("button", "", "作り直す");
+  regenerate.type = "button";
+  regenerate.title = "同じ質問でもう一度調べる";
+  regenerate.addEventListener("click", (e) => redo(e.currentTarget.closest(".turn").querySelector(".question").textContent, index));
+  actions.append(regenerate);
   if (trace_id) {
     const button = el("button", "", `LLMとのやりとり（${llm_calls}回）`);
     button.type = "button";
     button.addEventListener("click", () => openTrace(trace_id));
     actions.append(button);
   }
-  // 照合の結果がない（照合を入れる前の）回答には何も出さない
-  if (links) actions.append(markLinks(answer, links));
   const record = el("details", "record");
   record.append(el("summary", "", "調査の記録を見る"), membersView(reports.map(memberView)));
-  body.append(answer, actions, record);
+  body.append(answer);
+  // 照合の結果がない（照合を入れる前の）回答には出典を出さない
+  if (links) body.append(citations(answer, links));
+  body.append(actions, record);
   return node;
 }
 
-// 検索結果になかったリンクに印を付け、根拠の件数を返す
-function markLinks(answer, links) {
-  const key = (url) => url.replace(/[.,;:!?]+$/, "").replace(/\/+$/, "");
-  const missing = new Set(links.filter((l) => !l.found).map((l) => key(l.url)));
-  for (const a of answer.querySelectorAll("a")) {
-    if (!missing.has(key(a.getAttribute("href")))) continue;
-    a.classList.add("unverified");
-    a.title = "所員の検索結果にないリンクです。LLMが作ったURLかもしれません";
+// 回答の中のリンクに出典の番号を振り、出典の一覧を返す。検索結果になかったリンクには印を付ける
+function citations(answer, links) {
+  if (!links.length) {
+    const none = el("div", "citations");
+    none.append(el("span", "pill unset", "根拠のリンクがありません"));
+    return none;
   }
-  if (!links.length) return el("span", "pill unset", "根拠のリンクなし");
-  if (!missing.size) return el("span", "pill done", `根拠のリンク${links.length}件はすべて検索結果にあります`);
-  const pill = el("span", "pill failed", `根拠のリンク${links.length}件のうち${missing.size}件は検索結果にありません`);
-  pill.title = "印の付いたリンクは、所員の検索結果に出てこなかったURLです";
-  return pill;
+  const key = (url) => url.replace(/[.,;:!?]+$/, "").replace(/\/+$/, "");
+  const numbers = new Map(links.map((l, i) => [key(l.url), i + 1]));
+  for (const a of answer.querySelectorAll("a")) {
+    const n = numbers.get(key(a.getAttribute("href")));
+    if (!n) continue;
+    const link = links[n - 1];
+    // URLがそのまま書かれていたら番号に置き換え、文字のリンクなら番号を後ろに添える
+    let mark = a;
+    if (a.textContent === a.getAttribute("href")) a.textContent = `[${n}]`;
+    else a.after((mark = Object.assign(el("a", "", `[${n}]`), { href: a.href, target: "_blank", rel: "noopener noreferrer" })));
+    mark.classList.add("cite");
+    mark.title = link.found
+      ? [link.title, link.source].filter(Boolean).join(" · ") || link.url
+      : "所員の検索結果にないリンクです。LLMが作ったURLかもしれません";
+    if (!link.found) mark.classList.add("unverified");
+  }
+
+  const missing = links.filter((l) => !l.found).length;
+  const box = el("details", "citations");
+  box.open = true;
+  const summary = el("summary", "", `出典 ${links.length}件`);
+  if (missing) summary.append(el("span", "pill failed", `${missing}件は検索結果にありません`));
+  const list = el("ol", "citation-list");
+  for (const link of links) {
+    const item = el("li", link.found ? "" : "unverified");
+    const a = el("a", "", link.title || link.url);
+    a.href = link.url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    const meta = link.found ? [link.source, link.date].filter(Boolean).join(" · ") : "検索結果にありません（LLMが作ったURLかもしれません）";
+    item.append(a, el("span", "citation-meta", meta));
+    if (link.title) item.append(el("span", "citation-url", link.url));
+    list.append(item);
+  }
+  box.append(summary, list);
+  return box;
 }
 
 // 調査中の表示。所員ごとの状態と、届いた分の回答を出す
@@ -500,6 +765,7 @@ function progressView() {
   const answer = el("div", "markdown streaming");
   const record = el("details", "record");
   record.open = true;
+  record.hidden = true; // 所員が動き出してから出す
   const members = membersView([]);
   record.append(el("summary", "", "調査の様子"), members);
   body.append(answer, record);
@@ -522,7 +788,11 @@ function progressView() {
   };
 
   const update = (event) => {
-    if (event.type === "member_start") {
+    if (event.type === "intake_start") {
+      meta.textContent = "依頼の内容を確かめています…";
+    } else if (event.type === "member_start") {
+      record.hidden = false;
+      meta.textContent = "所員が調べています…";
       if (!rows.has(event.source)) {
         const row = memberRow(event.agent, sourceLabels.get(event.source) ?? event.source);
         rows.set(event.source, row);
@@ -738,7 +1008,10 @@ function scrollToBottom() {
 }
 
 function showEmpty() {
-  titleEl.textContent = "新しい調査";
+  openedConversation = null;
+  turnCount = 0;
+  setPlaceholder(null);
+  renderHead();
   const node = el("div", "empty");
   node.id = "empty";
   const logo = el("img", "empty-logo");
