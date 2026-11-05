@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import unittest
 from unittest import mock
@@ -21,6 +22,9 @@ ISSUE = {
     "repository_url": "https://api.github.com/repos/me/infra",
 }
 COMMENT = {"user": {"login": "sato"}, "created_at": "2026-10-10T00:00:00Z", "body": "更新しました", "html_url": "https://github.com/me/infra/issues/7#issuecomment-1"}
+
+# configured は読み込み時の環境変数で決まるので、テストを動かす環境の .env に左右されないよう固定する
+CONFIGURED = dataclasses.replace(github.GITHUB, configured=True)
 
 
 class GitHubTest(unittest.TestCase):
@@ -107,11 +111,11 @@ class GitHubTest(unittest.TestCase):
 
     def test_check(self):
         self.serve({"/user": {"login": "sion"}})
-        self.assertEqual(sources.check(github.GITHUB), {"state": "ok", "message": "sion としてつながりました"})
+        self.assertEqual(sources.check(CONFIGURED), {"state": "ok", "message": "sion としてつながりました"})
 
     def test_check_error(self):
         self.serve({"/user": (401, {"message": "Bad credentials"})})
-        result = sources.check(github.GITHUB)
+        result = sources.check(CONFIGURED)
         self.assertEqual(result["state"], "error")
         self.assertIn("Bad credentials", result["message"])
 
